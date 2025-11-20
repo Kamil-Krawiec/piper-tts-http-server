@@ -6,7 +6,7 @@ It can be run locally or as a Docker container and automatically downloads Rhass
 ## Highlights
 - **Drop-in HTTP API** &ndash; mimics the OpenAI Audio Speech endpoint so you can reuse existing OpenAI client code.
 - **Self-hosted voices** &ndash; ships with the official `piper-tts` Python package and pulls voices from Hugging Face (`rhasspy/piper-voices`).
-- **Docker ready** &ndash; published to Docker Hub as `kod-zero/piper-openai-tts`, with a GitHub Actions workflow for automatic pushes.
+- **Docker ready** &ndash; published to Docker Hub as `kamilkrawiec/piper-openai-tts`, with a GitHub Actions workflow for automatic pushes.
 - **Configurable synthesis** &ndash; control model, speaker, speech speed, noise, and length-scale per request.
 
 ---
