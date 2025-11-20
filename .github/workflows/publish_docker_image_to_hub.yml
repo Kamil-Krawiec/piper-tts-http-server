@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
   
 env:
-  IMAGE_NAME: kod-zero/piper-openai-tts
+  IMAGE_NAME: kamilkrawiec/piper-openai-tts
 
 jobs:
   build-and-push:

@@ -15,7 +15,7 @@ It can be run locally or as a Docker container and automatically downloads Rhass
 
 ### Local Python environment
 ```bash
-git clone https://github.com/your-user/piper-tts-http-server.git
+git clone https://github.com/Kamil-Krawiec/piper-tts-http-server.git
 cd piper-tts-http-server
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -32,7 +32,7 @@ docker run --rm \
   -p 5000:5000 \
   -e PORT=5000 \
   -v "$(pwd)/piper-data:/data" \
-  kod-zero/piper-openai-tts:latest
+  kamilkrawiec/piper-openai-tts
 ```
 
 Need to customize the image? Build it locally:
