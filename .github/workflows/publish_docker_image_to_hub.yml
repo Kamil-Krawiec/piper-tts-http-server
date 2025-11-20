@@ -3,8 +3,7 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [ "main" ]
-    # Optional: Trigger manually
-    workflow_dispatch:
+  workflow_dispatch:
   
 env:
   IMAGE_NAME: kod-zero/piper-openai-tts
