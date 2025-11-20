@@ -116,15 +116,13 @@ async def generate_speech(request: OpenAISpeechRequest):
     else:
         final_length_scale = 1.0 / max(0.1, request.speed)
 
-    # --- FIX IS HERE ---
-    # Changed arguments to match Piper CLI (hyphens instead of underscores)
     cmd = [
         "piper",
         "--model", str(onnx_path),
         "--output_file", output_file,
-        "--length-scale", str(final_length_scale), # Fixed
-        "--noise-scale", str(request.noise_scale),   # Fixed
-        "--noise-w", str(request.noise_scale_w)      # Fixed (was --noise_scale_w)
+        "--length-scale", str(final_length_scale), 
+        "--noise-scale", str(request.noise_scale),   
+        "--noise-w", str(request.noise_scale_w)      
     ]
 
     if request.voice:
