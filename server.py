@@ -4,7 +4,7 @@ import subprocess
 import requests
 import uvicorn
 from pathlib import Path
-from typing import Optional, Generator, Union, List
+from typing import Optional, Generator, Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -43,7 +43,7 @@ class OpenAISpeechRequest(BaseModel):
             "model": "gpt-4o-mini-tts",
             "input": "Hello world",
             "voice": "alloy",
-            "format": "mp3",
+            "response_format": "mp3",
             "speed": 1.0
         }
 
@@ -51,13 +51,15 @@ class OpenAISpeechRequest(BaseModel):
     - `voice` is used as Piper voice name (e.g. 'pl_PL-gosia-medium').
     - For compatibility with some clients (e.g. Open WebUI), if `voice`
       is missing, `model` will be used as the Piper voice name.
+    - OpenAI uses `response_format`; this wrapper also accepts `format`
+      as a convenience alias.
     """
 
     model: str = Field(
         ...,
         description="TTS model name (kept for OpenAI compatibility; ignored by Piper).",
     )
-    input: Union[str, List[str]] = Field(
+    input: Union[str, list[str]] = Field(
         ..., description="The text to synthesize, or list of text segments."
     )
     voice: Optional[str] = Field(
@@ -67,14 +69,17 @@ class OpenAISpeechRequest(BaseModel):
             "If omitted, `model` will be used as voice name."
         ),
     )
-    # OpenAI uses `format`; we also accept legacy `response_format` for lenient clients.
+    # OpenAI uses `response_format`; we also accept `format` for lenient clients.
     format: Optional[str] = Field(
         None,
-        description="Output audio format. Supported: 'wav', 'mp3'. Default: 'wav' if not set.",
+        description=(
+            "Alias for OpenAI's `response_format`. Supported: 'wav', 'mp3'. "
+            "Default: 'wav' if not set."
+        ),
     )
     response_format: Optional[str] = Field(
         None,
-        description="Deprecated alias for `format` (accepted for compatibility).",
+        description="OpenAI field name for audio format (alias for `format`).",
     )
     speed: Optional[float] = Field(
         1.0,
@@ -111,6 +116,13 @@ class OpenAISpeechRequest(BaseModel):
 
 def get_voice_paths(voice_name: str):
     """Return local .onnx and .onnx.json paths for a given Piper voice."""
+    if (
+        "/" in voice_name
+        or "\\" in voice_name
+        or ".." in voice_name
+        or voice_name.startswith(".")
+    ):
+        raise ValueError(f"Invalid voice name: {voice_name!r}")
     return DATA_DIR / f"{voice_name}.onnx", DATA_DIR / f"{voice_name}.onnx.json"
 
 
@@ -121,7 +133,12 @@ def download_voice_if_missing(voice_name: str) -> bool:
     Voice naming convention is assumed to follow Rhasspy / Piper repos, e.g.:
     pl_PL-gosia-medium -> pl/pl_PL/gosia/medium/pl_PL-gosia-medium.{onnx,onnx.json}
     """
-    onnx_path, json_path = get_voice_paths(voice_name)
+    try:
+        onnx_path, json_path = get_voice_paths(voice_name)
+    except ValueError as exc:
+        logger.error("Invalid voice name format: '%s'", voice_name)
+        logger.debug("Voice validation error: %s", exc)
+        return False
 
     if onnx_path.exists() and json_path.exists():
         return True
@@ -216,7 +233,7 @@ def convert_audio_if_needed(
 
 
 def stream_audio_generator(
-    piper_cmd: list,
+    piper_cmd: list[str],
     input_text: str,
     wav_path: str,
     final_path: str,
@@ -288,6 +305,11 @@ async def generate_speech(request: OpenAISpeechRequest):
             detail="`voice` (or `model` as fallback) must be provided as Piper voice name.",
         )
 
+    try:
+        onnx_path, _ = get_voice_paths(voice_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     # Resolve effective output format (format has precedence over response_format)
     requested_format = request.format or request.response_format or "wav"
 
@@ -303,8 +325,6 @@ async def generate_speech(request: OpenAISpeechRequest):
     # Ensure voice files exist
     if not download_voice_if_missing(voice_name):
         raise HTTPException(status_code=404, detail=f"Voice '{voice_name}' not found.")
-
-    onnx_path, _ = get_voice_paths(voice_name)
 
     # Temporary file paths
     wav_path = f"/tmp/piper_{os.getpid()}_{os.urandom(4).hex()}.wav"

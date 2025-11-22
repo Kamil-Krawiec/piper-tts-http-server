@@ -123,6 +123,18 @@ def test_missing_voice_returns_404(monkeypatch):
     assert response.json()["detail"] == "Voice 'demo-voice' not found."
 
 
+def test_path_traversal_voice_name_rejected():
+    client = TestClient(server.app)
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={"model": "../etc/passwd", "input": "malicious"},
+    )
+
+    assert response.status_code == 400
+    assert "Invalid voice name" in response.json()["detail"]
+
+
 def test_empty_input_rejected(client_with_stubs):
     client, _cmds, _formats, _data_dir = client_with_stubs
 

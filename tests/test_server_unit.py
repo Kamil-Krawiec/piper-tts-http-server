@@ -13,6 +13,17 @@ def test_get_voice_paths_respects_data_dir(monkeypatch, tmp_path):
     assert json_path == tmp_path / "en_US-test-low.onnx.json"
 
 
+def test_get_voice_paths_rejects_path_traversal():
+    with pytest.raises(ValueError):
+        server.get_voice_paths("../etc/passwd")
+
+    with pytest.raises(ValueError):
+        server.get_voice_paths("..\\windows")
+
+    with pytest.raises(ValueError):
+        server.get_voice_paths(".hidden")
+
+
 def test_convert_audio_if_needed_rejects_unknown_format():
     # Unsupported target format should raise 400 and never call ffmpeg
     with pytest.raises(HTTPException) as excinfo:
