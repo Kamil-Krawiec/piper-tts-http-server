@@ -208,3 +208,5 @@ __marimo__/
 
 # Hugging Face Hub
 piper-data/
+# venv
+piper-tts/

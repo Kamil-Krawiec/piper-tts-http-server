@@ -69,8 +69,8 @@ class OpenAISpeechRequest(BaseModel):
     )
     # OpenAI uses `format`; we also accept legacy `response_format` for lenient clients.
     format: Optional[str] = Field(
-        "wav",
-        description="Output audio format. Supported: 'wav', 'mp3'. Default: 'wav'.",
+        None,
+        description="Output audio format. Supported: 'wav', 'mp3'. Default: 'wav' if not set.",
     )
     response_format: Optional[str] = Field(
         None,
