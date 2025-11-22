@@ -2,10 +2,11 @@
 FROM python:3.11-slim
 
 # Install system dependencies
-# espeak-ng is CRITICAL for Piper
+# espeak-ng is CRITICAL for Piper; ffmpeg enables mp3 conversion
 RUN apt-get update && apt-get install -y \
     espeak-ng \
     libsndfile1 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

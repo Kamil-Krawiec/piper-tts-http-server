@@ -1,7 +1,14 @@
 # Piper OpenAI TTS HTTP Server
 
 A lightweight FastAPI service that wraps [Piper](https://github.com/OHF-Voice/piper1-gpl) in an OpenAI-compatible `/v1/audio/speech` endpoint.  
-It can be run locally or as a Docker container and automatically downloads Rhasspy Piper voices on demand.
+Run it locally or in Docker; it auto-downloads Rhasspy Piper voices on demand and streams audio back like the OpenAI API.
+
+## Why self-host this
+- Keep your existing OpenAI client code while owning the audio pipeline (no vendor lock-in, works offline once voices are cached).
+- Cheap, local inference with Piper voices you control; ideal for on-prem, air-gapped, or cost-sensitive setups.
+- Simple drop-in: POST the same payload shape as `/v1/audio/speech`; `voice` can be passed explicitly or inferred from `model`.
+- Caches voices on disk so repeated requests are instant; swap or preload voices as files without code changes.
+- Small, transparent stack (FastAPI + piper-tts); easy to extend Dockerfile or `server.py` if you need custom flags.
 
 ## Highlights
 - **Drop-in HTTP API** &ndash; mimics the OpenAI Audio Speech endpoint so you can reuse existing OpenAI client code.
@@ -14,6 +21,11 @@ It can be run locally or as a Docker container and automatically downloads Rhass
 ## Getting Started
 
 ### Local Python environment
+Install system dependencies (Debian/Ubuntu example):
+```bash
+sudo apt-get update && sudo apt-get install -y espeak-ng libsndfile1 ffmpeg  # ffmpeg only if you want MP3 output
+```
+
 ```bash
 git clone https://github.com/Kamil-Krawiec/piper-tts-http-server.git
 cd piper-tts-http-server
@@ -41,26 +53,29 @@ docker build -t my-piper-tts .
 docker run --rm -p 5000:5000 -v "$(pwd)/piper-data:/data" my-piper-tts
 ```
 
+The published image already contains `espeak-ng`, `libsndfile1`, and `ffmpeg` for MP3 conversion.
+
 ---
 
 ## API Overview
 
 - **Endpoint:** `POST /v1/audio/speech`
-- **Response:** Streams back synthesized audio (`audio/wav`)
+- **Response:** Streams synthesized audio (`audio/wav` by default; `audio/mpeg` if `mp3` is requested and `ffmpeg` is installed)
 - **Voice assets:** Downloaded from `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0`
 
 ### Request body
 
-| Field            | Type    | Required | Default | Description |
-|------------------|---------|----------|---------|-------------|
-| `model`          | string  | ✅       | —       | Piper voice name, e.g. `pl_PL-gosia-medium`. Determines which ONNX voice file to use. |
-| `input`          | string  | ✅       | —       | Text to synthesize. |
-| `voice`          | string  | ❌       | `null`  | Speaker ID for multi-speaker voices. |
-| `response_format`| string  | ❌       | `mp3`   | Included for OpenAI compatibility. Output is currently WAV. |
-| `speed`          | float   | ❌       | `1.0`   | Speaking rate (higher = faster). Controls Piper length scale. |
-| `noise_scale`    | float   | ❌       | `0.667` | Controls pronunciation variability. |
-| `noise_scale_w`  | float   | ❌       | `0.8`   | Phoneme-level noise. |
-| `length_scale`   | float   | ❌       | derived | Optional direct Piper `--length-scale`. Overrides `speed`. |
+| Field                      | Type                 | Required | Default | Description |
+|----------------------------|----------------------|----------|---------|-------------|
+| `model`                    | string               | ✅       | —       | OpenAI-style model name. If `voice` is omitted, this value is used as the Piper voice name (e.g., `pl_PL-gosia-medium`). |
+| `voice`                    | string               | ❌       | `null`  | Preferred place to pass the Piper voice name. |
+| `input`                    | string or string[]   | ✅       | —       | Text to synthesize. Lists are joined with newlines. |
+| `format` / `response_format` | string             | ❌       | `wav`   | `wav` or `mp3`. MP3 conversion requires `ffmpeg` in the image/host. `format` is accepted as an alias for more lenient clients. |
+| `speed`                    | float                | ❌       | `1.0`   | Speaking rate multiplier; used to derive Piper length scale. |
+| `noise_scale`              | float                | ❌       | `0.667` | Piper noise scale (prosody variation). |
+| `noise_scale_w`            | float                | ❌       | `0.8`   | Piper phoneme noise. |
+| `length_scale`             | float                | ❌       | `1 / max(0.1, speed)` | Optional direct Piper `--length-scale`; overrides `speed` if set. |
+| `speaker`                  | integer              | ❌       | `null`  | Optional speaker ID for multi-speaker voices. |
 
 ### Example (Python)
 
@@ -68,8 +83,12 @@ docker run --rm -p 5000:5000 -v "$(pwd)/piper-data:/data" my-piper-tts
 import requests
 
 payload = {
-    "model": "pl_PL-gosia-medium",
-    "input": "Cześć! To jest demo syntezy mowy Piper.",
+    "model": "piper",  # OpenAI compatibility field; voice selection happens via `voice`
+    "voice": "pl_PL-gosia-medium",
+    "input": [
+        "Cześć! To jest demo syntezy mowy Piper.",
+        "List inputs are joined with newlines.",
+    ],
     "speed": 1.05,
     "noise_scale": 0.6
 }
@@ -85,7 +104,7 @@ with open("output.wav", "wb") as f:
 ```bash
 curl -o output.wav \
   -H "Content-Type: application/json" \
-  -d '{"model":"en_US-lessac-high","input":"Hello from Piper!"}' \
+  -d '{"model":"piper","voice":"en_US-lessac-high","input":"Hello from Piper!"}' \
   http://localhost:5000/v1/audio/speech
 ```
 
@@ -96,6 +115,7 @@ curl -o output.wav \
 - When a voice is requested for the first time, the server downloads `<voice>.onnx` and `<voice>.onnx.json` to `DATA_DIR`.
 - To preload voices, place both files in `DATA_DIR` ahead of time.
 - Remove cached voices by deleting their ONNX/JSON files; they will be re-downloaded on the next request.
+- Voice names are validated to prevent path traversal, so stick to canonical names from `rhasspy/piper-voices`.
 
 ---
 
@@ -108,7 +128,8 @@ curl -o output.wav \
 
 Additional tweaks:
 - **Custom Hugging Face mirror**: edit `HF_URL_BASE` in `server.py` if you host the voice files elsewhere.
-- **Alternative Piper args**: modify `cmd` in `server.py` to include extra flags (e.g., `--speaker-id` for experimental features).
+- **Alternative Piper args**: adjust how `piper_cmd` is built in `server.py` to include extra Piper flags (e.g., `--speaker`).
+- **MP3 output**: `ffmpeg` is included in the Docker image; if running locally, ensure it is installed so `response_format="mp3"` succeeds.
 - **Logging**: `logging.basicConfig` is defined at the top of `server.py`; adjust the level or format to suit your deployment.
 
 ---
@@ -117,9 +138,9 @@ Additional tweaks:
 1. FastAPI receives the request and validates it with Pydantic.
 2. The server ensures the requested voice exists locally, downloading it from Hugging Face if missing.
 3. Piper is invoked via the `piper` CLI (shipped through the `piper-tts` dependency) with the requested parameters.
-4. The resulting WAV file is streamed back to the client and then deleted from `/tmp`.
+4. The resulting audio is streamed back (converted to MP3 via `ffmpeg` if requested), and temporary files are cleaned up from `/tmp`.
 
-Dependencies are declared in `requirements.txt` (FastAPI, Uvicorn, Requests, `piper-tts`, Pydantic) and system packages (`espeak-ng`, `libsndfile1`) are provided by the Docker image.
+Dependencies are declared in `requirements.txt` (FastAPI, Uvicorn, Requests, `piper-tts`, Pydantic). System packages (`espeak-ng`, `libsndfile1`, `ffmpeg`) are provided by the Docker image; if running outside Docker, install the same packages locally for best parity.
 
 ---
 
