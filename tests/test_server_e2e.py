@@ -115,6 +115,29 @@ def test_response_format_alias(client_with_stubs):
     assert not list(data_dir.glob("piper_*.wav"))
 
 
+def test_response_format_overrides_format(client_with_stubs):
+    client, _, formats, data_dir = client_with_stubs
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "demo-voice",
+            "input": "precedence check",
+            "format": "wav",
+            "response_format": "mp3",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/mpeg")
+    assert response.content == b"FAKE-MP3"
+
+    # response_format should take precedence over format
+    assert formats == ["mp3"]
+
+    assert not list(data_dir.glob("piper_*.wav"))
+
+
 def test_missing_voice_returns_404(monkeypatch):
     # Force download_voice_if_missing to "fail"
     monkeypatch.setattr(server, "download_voice_if_missing", lambda _voice: False)

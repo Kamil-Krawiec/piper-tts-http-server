@@ -208,7 +208,7 @@ def convert_audio_if_needed(
     if target_format == "wav":
         return wav_path, media_type, []
 
-    mp3_path = wav_path.replace(".wav", ".mp3")
+    mp3_path = str(Path(wav_path).with_suffix(".mp3"))
     cmd = [
         "ffmpeg",
         "-y",  # overwrite without prompt
@@ -228,12 +228,19 @@ def convert_audio_if_needed(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+        if not os.path.exists(mp3_path):
+            logger.error("ffmpeg reported success but MP3 file was not created: %s", mp3_path)
+            raise HTTPException(
+                status_code=500,
+                detail="ffmpeg did not produce the expected MP3 file. Check output path and permissions.",
+            )
     except subprocess.CalledProcessError as e:
         logger.error("ffmpeg conversion failed: %s", e.stderr.decode("utf-8", "ignore"))
         raise HTTPException(
             status_code=500,
             detail="Failed to convert audio to mp3. Is ffmpeg installed in the container?",
         )
+    
 
     return mp3_path, media_type, [mp3_path]
 
