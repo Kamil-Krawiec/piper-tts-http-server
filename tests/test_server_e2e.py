@@ -31,12 +31,18 @@ def client_with_stubs(monkeypatch, tmp_path):
         """Stub for convert_audio_if_needed.
 
         We only care that the server passes the correct target_format,
-        so we track it and return the original WAV path.
+        so we track it. For mp3 we write a separate file to ensure the
+        response streams the converted bytes, not the original WAV.
         """
         fmt = (target_format or "wav").lower()
+        assert Path(wav_path).exists(), "Piper did not write WAV output"
         recorded_formats.append(fmt)
-        media_type = "audio/mpeg" if fmt == "mp3" else "audio/wav"
-        return wav_path, media_type, []
+        if fmt == "mp3":
+            mp3_path = Path(wav_path).with_suffix(".mp3")
+            mp3_path.write_bytes(b"FAKE-MP3")
+            return str(mp3_path), "audio/mpeg", [str(mp3_path)]
+
+        return wav_path, "audio/wav", []
 
     def fake_run(cmd, input=None, text=None, check=None, stdout=None, stderr=None):
         """Stub Piper CLI: write fake bytes to the output file and record the command."""
@@ -101,9 +107,32 @@ def test_response_format_alias(client_with_stubs):
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("audio/mpeg")
-    assert response.content == b"FAKEAUDIO"
+    assert response.content == b"FAKE-MP3"
 
     # The server should have resolved the effective format to "mp3"
+    assert formats == ["mp3"]
+
+    assert not list(data_dir.glob("piper_*.wav"))
+
+
+def test_response_format_overrides_format(client_with_stubs):
+    client, _, formats, data_dir = client_with_stubs
+
+    response = client.post(
+        "/v1/audio/speech",
+        json={
+            "model": "demo-voice",
+            "input": "precedence check",
+            "format": "wav",
+            "response_format": "mp3",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/mpeg")
+    assert response.content == b"FAKE-MP3"
+
+    # response_format should take precedence over format
     assert formats == ["mp3"]
 
     assert not list(data_dir.glob("piper_*.wav"))

@@ -177,6 +177,19 @@ def download_voice_if_missing(voice_name: str) -> bool:
         return False
 
 
+def normalize_audio_format(target_format: Optional[str]) -> tuple[str, str]:
+    """Validate/normalize audio format and return (format, media_type)."""
+    fmt = (target_format or "wav").lower()
+    if fmt == "wav":
+        return "wav", "audio/wav"
+    if fmt == "mp3":
+        return "mp3", "audio/mpeg"
+    raise HTTPException(
+        status_code=400,
+        detail="Unsupported audio format. Only 'wav' and 'mp3' are supported.",
+    )
+
+
 def convert_audio_if_needed(
     wav_path: str, target_format: str
 ) -> tuple[str, str, list[str]]:
@@ -190,64 +203,58 @@ def convert_audio_if_needed(
         - Requires `ffmpeg` in PATH for mp3 conversion.
         - We only support 'wav' and 'mp3' to stay simple and predictable.
     """
-    target_format = (target_format or "wav").lower()
+    target_format, media_type = normalize_audio_format(target_format)
 
     if target_format == "wav":
-        return wav_path, "audio/wav", []
+        return wav_path, media_type, []
 
-    if target_format == "mp3":
-        mp3_path = wav_path.replace(".wav", ".mp3")
-        cmd = [
-            "ffmpeg",
-            "-y",  # overwrite without prompt
-            "-i",
-            wav_path,
-            "-codec:a",
-            "libmp3lame",
-            "-qscale:a",
-            "4",
-            mp3_path,
-        ]
+    mp3_path = str(Path(wav_path).with_suffix(".mp3"))
+    cmd = [
+        "ffmpeg",
+        "-y",  # overwrite without prompt
+        "-i",
+        wav_path,
+        "-codec:a",
+        "libmp3lame",
+        "-qscale:a",
+        "4",
+        mp3_path,
+    ]
 
-        try:
-            subprocess.run(
-                cmd,
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except subprocess.CalledProcessError as e:
-            logger.error("ffmpeg conversion failed: %s", e.stderr.decode("utf-8", "ignore"))
+    try:
+        subprocess.run(
+            cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if not os.path.exists(mp3_path):
+            logger.error("ffmpeg reported success but MP3 file was not created: %s", mp3_path)
             raise HTTPException(
                 status_code=500,
-                detail="Failed to convert audio to mp3. Is ffmpeg installed in the container?",
+                detail="ffmpeg did not produce the expected MP3 file. Check output path and permissions.",
             )
+    except subprocess.CalledProcessError as e:
+        logger.error("ffmpeg conversion failed: %s", e.stderr.decode("utf-8", "ignore"))
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to convert audio to mp3. Is ffmpeg installed in the container?",
+        )
+    
 
-        return mp3_path, "audio/mpeg", [mp3_path]
-
-    # Unsupported format -> 400 Bad Request
-    raise HTTPException(
-        status_code=400,
-        detail="Unsupported audio format. Only 'wav' and 'mp3' are supported.",
-    )
+    return mp3_path, media_type, [mp3_path]
 
 
 def stream_audio_generator(
     piper_cmd: list[str],
     input_text: str,
     wav_path: str,
-    final_path: str,
-    extra_cleanup: Optional[list[str]] = None,
+    target_format: str,
 ) -> Generator[bytes, None, None]:
     """
-    Run Piper, optionally convert the output, then stream audio bytes.
-
-    This function is executed in a threadpool by Starlette, so blocking calls
-    (subprocess, file I/O) are acceptable here.
+    Run Piper to produce a WAV file, optionally convert it, then stream audio bytes.
     """
     cleanup_files = [wav_path]
-    if extra_cleanup:
-        cleanup_files.extend(extra_cleanup)
 
     try:
         # 1) Run Piper to produce WAV file
@@ -267,14 +274,19 @@ def stream_audio_generator(
                 detail=f"Piper failed with exit code {result.returncode}",
             )
 
-        # 2) If final_path != wav_path conversion has already been done
-        #    outside this generator; we just stream the final file.
-        path_to_stream = final_path
+        # 2) Now that WAV exists, perform optional conversion
+        final_path, _, extra_cleanup = convert_audio_if_needed(
+            wav_path, target_format
+        )
+        if extra_cleanup:
+            cleanup_files.extend(extra_cleanup)
 
-        with open(path_to_stream, "rb") as audio:
+        # 3) Stream the final audio file (WAV or MP3)
+        with open(final_path, "rb") as audio:
             for chunk in iter(lambda: audio.read(8192), b""):
                 yield chunk
     finally:
+        # 4) Cleanup temporary files
         for f in cleanup_files:
             try:
                 if f and os.path.exists(f):
@@ -310,8 +322,9 @@ async def generate_speech(request: OpenAISpeechRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # Resolve effective output format (format has precedence over response_format)
-    requested_format = request.format or request.response_format or "wav"
+    # Resolve effective output format (response_format has precedence over format)
+    requested_format = request.response_format or request.format or "wav"
+    target_format, media_type = normalize_audio_format(requested_format)
 
     # Normalize and join input text
     if isinstance(request.input, list):
@@ -326,7 +339,7 @@ async def generate_speech(request: OpenAISpeechRequest):
     if not download_voice_if_missing(voice_name):
         raise HTTPException(status_code=404, detail=f"Voice '{voice_name}' not found.")
 
-    # Temporary file paths
+    # Temporary file path for Piper output
     wav_path = f"/tmp/piper_{os.getpid()}_{os.urandom(4).hex()}.wav"
 
     # Derive Piper length scale from speed if not explicitly set
@@ -354,22 +367,15 @@ async def generate_speech(request: OpenAISpeechRequest):
     if request.speaker is not None:
         piper_cmd.extend(["--speaker", str(request.speaker)])
 
-    # Perform potential format conversion up-front to know final_path + media_type
-    final_path, media_type, extra_cleanup = convert_audio_if_needed(
-        wav_path, requested_format
-    )
-
     return StreamingResponse(
         stream_audio_generator(
             piper_cmd=piper_cmd,
             input_text=input_text,
             wav_path=wav_path,
-            final_path=final_path,
-            extra_cleanup=extra_cleanup,
+            target_format=target_format,
         ),
         media_type=media_type,
     )
-
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
