@@ -236,18 +236,12 @@ def stream_audio_generator(
     piper_cmd: list[str],
     input_text: str,
     wav_path: str,
-    final_path: str,
-    extra_cleanup: Optional[list[str]] = None,
+    target_format: str,
 ) -> Generator[bytes, None, None]:
     """
-    Run Piper, optionally convert the output, then stream audio bytes.
-
-    This function is executed in a threadpool by Starlette, so blocking calls
-    (subprocess, file I/O) are acceptable here.
+    Run Piper to produce a WAV file, optionally convert it, then stream audio bytes.
     """
     cleanup_files = [wav_path]
-    if extra_cleanup:
-        cleanup_files.extend(extra_cleanup)
 
     try:
         # 1) Run Piper to produce WAV file
@@ -267,14 +261,20 @@ def stream_audio_generator(
                 detail=f"Piper failed with exit code {result.returncode}",
             )
 
-        # 2) If final_path != wav_path conversion has already been done
-        #    outside this generator; we just stream the final file.
-        path_to_stream = final_path
+        # 2) Now that WAV exists, perform optional conversion
+        final_path, _ , extra_cleanup = convert_audio_if_needed(
+            wav_path, target_format
+        )
+        if extra_cleanup:
+            cleanup_files.extend(extra_cleanup)
 
-        with open(path_to_stream, "rb") as audio:
+        # 3) Stream the final audio file (WAV or MP3)
+        with open(final_path, "rb") as audio:
             for chunk in iter(lambda: audio.read(8192), b""):
                 yield chunk
+
     finally:
+        # 4) Cleanup temporary files
         for f in cleanup_files:
             try:
                 if f and os.path.exists(f):
@@ -310,8 +310,19 @@ async def generate_speech(request: OpenAISpeechRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # Resolve effective output format (format has precedence over response_format)
-    requested_format = request.format or request.response_format or "wav"
+    # Resolve effective output format (response_format has precedence over format)
+    requested_format = request.response_format or request.format or "wav"
+    target_format = (requested_format or "wav").lower()
+
+    if target_format == "wav":
+        media_type = "audio/wav"
+    elif target_format == "mp3":
+        media_type = "audio/mpeg"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported audio format. Only 'wav' and 'mp3' are supported.",
+        )
 
     # Normalize and join input text
     if isinstance(request.input, list):
@@ -326,7 +337,7 @@ async def generate_speech(request: OpenAISpeechRequest):
     if not download_voice_if_missing(voice_name):
         raise HTTPException(status_code=404, detail=f"Voice '{voice_name}' not found.")
 
-    # Temporary file paths
+    # Temporary file path for Piper output
     wav_path = f"/tmp/piper_{os.getpid()}_{os.urandom(4).hex()}.wav"
 
     # Derive Piper length scale from speed if not explicitly set
@@ -354,22 +365,15 @@ async def generate_speech(request: OpenAISpeechRequest):
     if request.speaker is not None:
         piper_cmd.extend(["--speaker", str(request.speaker)])
 
-    # Perform potential format conversion up-front to know final_path + media_type
-    final_path, media_type, extra_cleanup = convert_audio_if_needed(
-        wav_path, requested_format
-    )
-
     return StreamingResponse(
         stream_audio_generator(
             piper_cmd=piper_cmd,
             input_text=input_text,
             wav_path=wav_path,
-            final_path=final_path,
-            extra_cleanup=extra_cleanup,
+            target_format=target_format,
         ),
         media_type=media_type,
     )
-
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=PORT)
