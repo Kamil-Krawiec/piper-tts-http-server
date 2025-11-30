@@ -3,6 +3,8 @@
 A lightweight FastAPI service that wraps [Piper](https://github.com/OHF-Voice/piper1-gpl) in an OpenAI-compatible `/v1/audio/speech` endpoint.  
 Run it locally or in Docker; it auto-downloads Rhasspy Piper voices on demand and streams audio back like the OpenAI API.
 
+[Link to DockerHub package](https://hub.docker.com/repository/docker/kamilkrawiec/piper-openai-tts/general)
+
 ## Why self-host this
 - Keep your existing OpenAI client code while owning the audio pipeline (no vendor lock-in, works offline once voices are cached).
 - Cheap, local inference with Piper voices you control; ideal for on-prem, air-gapped, or cost-sensitive setups.
