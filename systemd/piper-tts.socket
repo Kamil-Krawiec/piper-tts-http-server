@@ -1,0 +1,16 @@
+# systemd socket unit for Piper TTS on-demand activation.
+# Author: Piotr Minkina <piotrminkina@users.noreply.github.com>
+#
+# Deploy to: ~/.config/systemd/user/piper-tts.socket
+# Enable:    systemctl --user enable --now piper-tts.socket
+
+[Unit]
+Description=Piper TTS Socket
+
+[Socket]
+# Passed as fd 3 (AF_INET6 dual-stack) to uvicorn via --sd-activate
+ListenStream=[::]:5000
+BindIPv6Only=default
+
+[Install]
+WantedBy=sockets.target

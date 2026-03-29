@@ -57,6 +57,35 @@ docker run --rm -p 5000:5000 -v "$(pwd)/piper-data:/data" my-piper-tts
 
 The published image already contains `espeak-ng`, `libsndfile1`, and `ffmpeg` for MP3 conversion.
 
+### systemd socket activation (Podman Quadlet)
+
+Socket activation lets systemd own the listening port and start the container on demand — zero resource usage when idle, instant recovery on crash, and no manual `docker run` needed.
+
+1. Prepare the voice data directory:
+   ```bash
+   mkdir -p ~/.local/share/piper-tts/
+   ```
+
+2. Copy the unit files:
+   ```bash
+   cp systemd/piper-tts.socket   ~/.config/systemd/user/
+   cp systemd/piper-tts.container ~/.config/containers/systemd/
+   ```
+
+3. Reload and enable:
+   ```bash
+   systemctl --user daemon-reload
+   systemctl --user enable --now piper-tts.socket
+   ```
+
+The container starts automatically on the first request to port 5000. Verify with:
+```bash
+curl -s -o /dev/null -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"piper","voice":"en_US-lessac-medium","input":"Hello"}' \
+  http://localhost:5000/v1/audio/speech
+```
+
 ---
 
 ## API Overview

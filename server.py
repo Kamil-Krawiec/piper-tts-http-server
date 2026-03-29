@@ -1,5 +1,8 @@
+import argparse
+import asyncio
 import os
 import logging
+import socket
 import subprocess
 import requests
 import uvicorn
@@ -377,5 +380,48 @@ async def generate_speech(request: OpenAISpeechRequest):
         media_type=media_type,
     )
 
-if __name__ == "__main__":
+class _ActivatedSocket(socket.socket):
+    """Socket that skips listen() — already done by systemd."""
+
+    def listen(self, __backlog: int = 0) -> None:  # noqa: D102
+        pass
+
+
+def _run_sd_activated() -> None:
+    """Start uvicorn using a systemd socket-activated file descriptor.
+
+    systemd passes the listening socket as fd 3.  uvicorn 0.27 hardcodes
+    AF_UNIX in socket.fromfd() for --fd, and asyncio calls sock.listen()
+    which fails on an already-listening socket in rootless containers.
+    We work around both issues with a custom socket subclass.
+    """
+    sock = _ActivatedSocket(
+        fileno=3,
+        family=socket.AF_INET6,
+        type=socket.SOCK_STREAM,
+    )
+    sock.setblocking(False)
+
+    config = uvicorn.Config("server:app")
+    server = uvicorn.Server(config)
+    asyncio.run(server.serve(sockets=[sock]))
+
+
+def _run_http_server() -> None:
+    """Start uvicorn binding directly to host:port."""
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Piper OpenAI TTS HTTP Server")
+    parser.add_argument(
+        "--sd-activate",
+        action="store_true",
+        help="Use systemd socket activation (fd 3) instead of binding a port.",
+    )
+    args = parser.parse_args()
+
+    if args.sd_activate:
+        _run_sd_activated()
+    else:
+        _run_http_server()
