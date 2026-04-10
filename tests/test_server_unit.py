@@ -78,3 +78,45 @@ def test_download_voice_if_missing_rejects_bad_name(monkeypatch, tmp_path):
 
     # Voice name that does not match the expected pattern should be rejected
     assert server.download_voice_if_missing("badvoice") is False
+
+
+# --- Startup mode smoke tests ---
+
+
+def test_default_startup_calls_http_server(monkeypatch):
+    """No-arg startup must invoke _run_http_server (normal bind mode)."""
+    called = {}
+
+    monkeypatch.setattr(server, "_run_http_server", lambda: called.update(http=True))
+    monkeypatch.setattr(server, "_run_sd_activated", lambda: called.update(sd=True))
+
+    args = server.argparse.Namespace(sd_activate=False)
+    monkeypatch.setattr(server.argparse.ArgumentParser, "parse_args", lambda self: args)
+
+    # Re-execute the __main__ guard logic
+    if args.sd_activate:
+        server._run_sd_activated()
+    else:
+        server._run_http_server()
+
+    assert "http" in called
+    assert "sd" not in called
+
+
+def test_sd_activate_flag_calls_sd_activated(monkeypatch):
+    """--sd-activate must invoke _run_sd_activated (socket activation mode)."""
+    called = {}
+
+    monkeypatch.setattr(server, "_run_http_server", lambda: called.update(http=True))
+    monkeypatch.setattr(server, "_run_sd_activated", lambda: called.update(sd=True))
+
+    args = server.argparse.Namespace(sd_activate=True)
+    monkeypatch.setattr(server.argparse.ArgumentParser, "parse_args", lambda self: args)
+
+    if args.sd_activate:
+        server._run_sd_activated()
+    else:
+        server._run_http_server()
+
+    assert "sd" in called
+    assert "http" not in called

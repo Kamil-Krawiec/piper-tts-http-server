@@ -32,3 +32,4 @@ EXPOSE 5000
 
 # Entrypoint delegates to server.py; pass --sd-activate for socket activation
 ENTRYPOINT ["./docker-entrypoint.sh"]
+CMD ["python", "server.py"]
