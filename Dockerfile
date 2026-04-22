@@ -16,8 +16,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the server code
-COPY server.py .
+# Copy the server code and entrypoint
+COPY server.py docker-entrypoint.sh ./
+RUN chmod +x docker-entrypoint.sh
 
 # Set environment variables
 ENV DATA_DIR=/data
@@ -29,5 +30,6 @@ RUN mkdir -p /data
 # Expose the port
 EXPOSE 5000
 
-# Run the server using python directly
+# Entrypoint delegates to server.py; pass --sd-activate for socket activation
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["python", "server.py"]

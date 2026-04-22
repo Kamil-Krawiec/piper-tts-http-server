@@ -1,0 +1,21 @@
+# Podman Quadlet unit for Piper OpenAI-TTS with systemd socket activation.
+# Author: Piotr Minkina <piotrminkina@users.noreply.github.com>
+#
+# Deploy to: ~/.config/containers/systemd/piper-tts.container
+# Reload:    systemctl --user daemon-reload
+# Start:     systemctl --user start piper-tts.socket
+
+[Unit]
+Description=Piper OpenAI-TTS Container
+Requires=piper-tts.socket
+After=piper-tts.socket
+
+[Container]
+Image=docker.io/kamilkrawiec/piper-openai-tts:latest
+Exec=--sd-activate
+Network=pasta
+Volume=%h/.local/share/piper-tts/:/data/:rw
+Annotation=run.oci.keep_original_groups=1
+
+[Install]
+WantedBy=default.target
