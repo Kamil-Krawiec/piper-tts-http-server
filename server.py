@@ -29,7 +29,7 @@ logger = logging.getLogger("piper-openai-tts")
 # --- FastAPI App ---
 app = FastAPI(
     title="Piper OpenAI TTS",
-    description="An OpenAI-compatible /v1/audio/speech API wrapper for Piper.",
+    description="An OpenAI-compatible audio API wrapper for Piper.",
     version="1.1.0",
 )
 
@@ -127,6 +127,16 @@ def get_voice_paths(voice_name: str):
     ):
         raise ValueError(f"Invalid voice name: {voice_name!r}")
     return DATA_DIR / f"{voice_name}.onnx", DATA_DIR / f"{voice_name}.onnx.json"
+
+
+def get_installed_voice_catalog() -> list[dict[str, str]]:
+    """Return locally installed, runnable Piper voices in stable order."""
+    voices = []
+    for onnx_path in DATA_DIR.glob("*.onnx"):
+        voice_name = onnx_path.stem
+        if onnx_path.is_file() and onnx_path.with_suffix(".onnx.json").is_file():
+            voices.append({"id": voice_name, "name": voice_name})
+    return sorted(voices, key=lambda voice: voice["id"])
 
 
 def download_voice_if_missing(voice_name: str) -> bool:
@@ -301,6 +311,7 @@ def stream_audio_generator(
 # --- API Endpoints ---
 
 
+@app.post("/audio/speech", include_in_schema=False)
 @app.post("/v1/audio/speech")
 async def generate_speech(request: OpenAISpeechRequest):
     """
@@ -337,6 +348,23 @@ async def generate_speech(request: OpenAISpeechRequest):
 
     if not input_text:
         raise HTTPException(status_code=400, detail="`input` text must not be empty.")
+
+    logger.info(
+        "Speech request parameters: model=%r voice=%r format=%r "
+        "response_format=%r speed=%s noise_scale=%s noise_scale_w=%s "
+        "length_scale=%s speaker=%s input_segments=%d input_characters=%d",
+        request.model,
+        request.voice,
+        request.format,
+        request.response_format,
+        request.speed,
+        request.noise_scale,
+        request.noise_scale_w,
+        request.length_scale,
+        request.speaker,
+        len(request.input) if isinstance(request.input, list) else 1,
+        len(input_text),
+    )
 
     # Ensure voice files exist
     if not download_voice_if_missing(voice_name):
@@ -379,6 +407,21 @@ async def generate_speech(request: OpenAISpeechRequest):
         ),
         media_type=media_type,
     )
+
+
+@app.get("/audio/voices", include_in_schema=False)
+@app.get("/v1/audio/voices")
+async def list_voices():
+    """List installed Piper voices for OpenAI-compatible clients."""
+    return {"voices": get_installed_voice_catalog()}
+
+
+@app.get("/audio/models", include_in_schema=False)
+@app.get("/v1/audio/models")
+async def list_models():
+    """List installed Piper voice models for OpenAI-compatible clients."""
+    return {"models": get_installed_voice_catalog()}
+
 
 class _ActivatedSocket(socket.socket):
     """Socket that skips listen() — already done by systemd."""
