@@ -169,17 +169,20 @@ def test_speech_request_logs_parameters_without_input_text(client_with_stubs, ca
         response = client.post(
             "/v1/audio/speech",
             json={
-                "model": "tts-1",
-                "voice": "pl_PL-gosia-medium",
+                "model": "pl_PL-gosia-medium",
                 "input": "tekst, którego nie należy logować",
+                "format": "WAV",
                 "speed": 1.25,
                 "speaker": 2,
             },
         )
 
     assert response.status_code == 200
-    assert "model='tts-1'" in caplog.text
-    assert "voice='pl_PL-gosia-medium'" in caplog.text
+    assert "model='pl_PL-gosia-medium'" in caplog.text
+    assert "requested_voice=None" in caplog.text
+    assert "effective_voice='pl_PL-gosia-medium'" in caplog.text
+    assert "format='WAV'" in caplog.text
+    assert "effective_format='wav'" in caplog.text
     assert "speed=1.25" in caplog.text
     assert "speaker=2" in caplog.text
     assert "input_characters=33" in caplog.text

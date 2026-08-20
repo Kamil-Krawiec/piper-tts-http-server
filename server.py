@@ -350,13 +350,16 @@ async def generate_speech(request: OpenAISpeechRequest):
         raise HTTPException(status_code=400, detail="`input` text must not be empty.")
 
     logger.info(
-        "Speech request parameters: model=%r voice=%r format=%r "
-        "response_format=%r speed=%s noise_scale=%s noise_scale_w=%s "
-        "length_scale=%s speaker=%s input_segments=%d input_characters=%d",
+        "Speech request parameters: model=%r requested_voice=%r "
+        "effective_voice=%r format=%r response_format=%r effective_format=%r "
+        "speed=%s noise_scale=%s noise_scale_w=%s length_scale=%s speaker=%s "
+        "input_segments=%d input_characters=%d",
         request.model,
         request.voice,
+        voice_name,
         request.format,
         request.response_format,
+        target_format,
         request.speed,
         request.noise_scale,
         request.noise_scale_w,
