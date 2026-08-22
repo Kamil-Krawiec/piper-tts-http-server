@@ -1,6 +1,6 @@
 # Piper OpenAI TTS HTTP Server
 
-A lightweight FastAPI service that wraps [Piper](https://github.com/OHF-Voice/piper1-gpl) in an OpenAI-compatible `/v1/audio/speech` endpoint.  
+A lightweight FastAPI service that wraps [Piper](https://github.com/OHF-Voice/piper1-gpl) in OpenAI-compatible audio endpoints.
 Run it locally or in Docker; it auto-downloads Rhasspy Piper voices on demand and streams audio back like the OpenAI API.
 
 [Link to DockerHub package](https://hub.docker.com/repository/docker/kamilkrawiec/piper-openai-tts/general)
@@ -36,7 +36,7 @@ pip install -r requirements.txt
 DATA_DIR=./data PORT=5000 python server.py
 ```
 
-The server exposes `http://localhost:5000/v1/audio/speech` and stores/downloads Piper voice files under `DATA_DIR` (defaults to `/data`).
+The server exposes `http://localhost:5000/v1/audio/speech` and stores/downloads Piper voice files under `DATA_DIR` (defaults to `/data`). The unversioned `/audio/speech` route is also available for clients such as Open WebUI that append the OpenAI audio path themselves.
 
 ### Docker (recommended)
 
@@ -90,9 +90,13 @@ curl -s -o /dev/null -w '%{http_code}' \
 
 ## API Overview
 
-- **Endpoint:** `POST /v1/audio/speech`
+- **Speech:** `POST /v1/audio/speech` or `POST /audio/speech`
+- **Installed voices:** `GET /v1/audio/voices` or `GET /audio/voices`
+- **Installed voice models:** `GET /v1/audio/models` or `GET /audio/models`
 - **Response:** Streams synthesized audio (`audio/wav` by default; `audio/mpeg` if `mp3` is requested and `ffmpeg` is installed)
 - **Voice assets:** Downloaded from `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0`
+
+Open WebUI may be configured with either `http://<piper-host>:5000` or `http://<piper-host>:5000/v1` as its OpenAI TTS base URL. Its model and voice discovery requests return locally installed voices that have both the `.onnx` and `.onnx.json` files. The standard `tts-1` model value is accepted when `voice` contains the Piper voice name.
 
 ### Request body
 
@@ -161,7 +165,7 @@ Additional tweaks:
 - **Custom Hugging Face mirror**: edit `HF_URL_BASE` in `server.py` if you host the voice files elsewhere.
 - **Alternative Piper args**: adjust how `piper_cmd` is built in `server.py` to include extra Piper flags (e.g., `--speaker`).
 - **MP3 output**: `ffmpeg` is included in the Docker image; if running locally, ensure it is installed so `response_format="mp3"` succeeds.
-- **Logging**: `logging.basicConfig` is defined at the top of `server.py`; adjust the level or format to suit your deployment.
+- **Logging**: synthesis parameters are logged at `INFO` without recording the input text; `logging.basicConfig` is defined at the top of `server.py` if you need to adjust the level or format.
 
 ---
 

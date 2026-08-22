@@ -25,6 +25,22 @@ def test_get_voice_paths_rejects_path_traversal():
         server.get_voice_paths(".hidden")
 
 
+def test_get_installed_voice_catalog_lists_complete_pairs_in_stable_order(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    (tmp_path / "pl_PL-gosia-medium.onnx").write_bytes(b"model")
+    (tmp_path / "pl_PL-gosia-medium.onnx.json").write_text("{}")
+    (tmp_path / "en_US-lessac-medium.onnx").write_bytes(b"model")
+    (tmp_path / "en_US-lessac-medium.onnx.json").write_text("{}")
+    (tmp_path / "incomplete.onnx").write_bytes(b"model")
+
+    assert server.get_installed_voice_catalog() == [
+        {"id": "en_US-lessac-medium", "name": "en_US-lessac-medium"},
+        {"id": "pl_PL-gosia-medium", "name": "pl_PL-gosia-medium"},
+    ]
+
+
 def test_convert_audio_if_needed_rejects_unknown_format():
     # Unsupported target format should raise 400 and never call ffmpeg
     with pytest.raises(HTTPException) as excinfo:

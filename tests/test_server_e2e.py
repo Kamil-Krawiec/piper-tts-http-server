@@ -1,3 +1,4 @@
+import logging
 import subprocess
 from pathlib import Path
 
@@ -136,6 +137,73 @@ def test_response_format_overrides_format(client_with_stubs):
     assert formats == ["mp3"]
 
     assert not list(data_dir.glob("piper_*.wav"))
+
+
+def test_openwebui_route_accepts_standard_model_with_piper_voice_and_mp3(
+    client_with_stubs,
+):
+    client, cmds, formats, _data_dir = client_with_stubs
+
+    response = client.post(
+        "/audio/speech",
+        json={
+            "model": "tts-1",
+            "voice": "pl_PL-gosia-medium",
+            "input": "Cześć z Open WebUI",
+            "response_format": "mp3",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("audio/mpeg")
+    assert formats == ["mp3"]
+    assert cmds[0][cmds[0].index("--model") + 1].endswith(
+        "pl_PL-gosia-medium.onnx"
+    )
+
+
+def test_speech_request_logs_parameters_without_input_text(client_with_stubs, caplog):
+    client, _cmds, _formats, _data_dir = client_with_stubs
+
+    with caplog.at_level(logging.INFO, logger="piper-openai-tts"):
+        response = client.post(
+            "/v1/audio/speech",
+            json={
+                "model": "pl_PL-gosia-medium",
+                "input": "tekst, którego nie należy logować",
+                "format": "WAV",
+                "speed": 1.25,
+                "speaker": 2,
+            },
+        )
+
+    assert response.status_code == 200
+    assert "model='pl_PL-gosia-medium'" in caplog.text
+    assert "requested_voice=None" in caplog.text
+    assert "effective_voice='pl_PL-gosia-medium'" in caplog.text
+    assert "format='WAV'" in caplog.text
+    assert "effective_format='wav'" in caplog.text
+    assert "speed=1.25" in caplog.text
+    assert "speaker=2" in caplog.text
+    assert "input_characters=33" in caplog.text
+    assert "tekst, którego nie należy logować" not in caplog.text
+
+
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+def test_discovery_endpoints_list_installed_voices(client_with_stubs, prefix):
+    client, _cmds, _formats, data_dir = client_with_stubs
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / "pl_PL-gosia-medium.onnx").write_bytes(b"model")
+    (data_dir / "pl_PL-gosia-medium.onnx.json").write_text("{}")
+
+    voices_response = client.get(f"{prefix}/audio/voices")
+    models_response = client.get(f"{prefix}/audio/models")
+    expected = [{"id": "pl_PL-gosia-medium", "name": "pl_PL-gosia-medium"}]
+
+    assert voices_response.status_code == 200
+    assert voices_response.json() == {"voices": expected}
+    assert models_response.status_code == 200
+    assert models_response.json() == {"models": expected}
 
 
 def test_missing_voice_returns_404(monkeypatch):
