@@ -1,6 +1,7 @@
+from pathlib import Path
+
 import pytest
 from fastapi import HTTPException
-from pathlib import Path
 
 import server
 
@@ -55,7 +56,7 @@ def test_convert_audio_if_needed_converts_to_mp3(monkeypatch, tmp_path):
 
     recorded_cmd = {}
 
-    def fake_run(cmd, check=None, stdout=None, stderr=None):
+    def fake_run(cmd, check=None, **_kwargs):
         recorded_cmd["cmd"] = cmd
         Path(str(wav_path).replace(".wav", ".mp3")).write_bytes(b"mp3-bytes")
 

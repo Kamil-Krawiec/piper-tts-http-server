@@ -1,0 +1,11 @@
+.git
+.gitignore
+piper-tts/
+piper-data/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.coverage*
+*.py[cod]
+.env
+.env.*

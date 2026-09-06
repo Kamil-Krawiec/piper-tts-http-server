@@ -160,6 +160,18 @@ curl -o output.wav \
 |----------------------|---------|---------|
 | `DATA_DIR`           | `/data` | Location where voice files are cached. Mount/persist this when using Docker. |
 | `PORT`               | `5000`  | Port that Uvicorn binds to. |
+| `API_KEY`            | unset   | Optional Bearer token. When set, speech and discovery endpoints require `Authorization: Bearer <API_KEY>`. |
+| `MAX_INPUT_CHARS`    | `50000` | Maximum total input characters per request. |
+| `MAX_INPUT_SEGMENTS` | `200`   | Maximum number of text segments in a list input. |
+| `MAX_REQUEST_BODY_BYTES` | `262144` | Maximum HTTP request body size. |
+| `MAX_VOICE_BYTES`    | `524288000` | Maximum downloaded voice asset size. |
+| `PIPER_TIMEOUT`      | `120`   | Maximum seconds allowed for one Piper synthesis. |
+| `FFMPEG_TIMEOUT`     | `60`    | Maximum seconds allowed for one MP3 conversion. |
+
+Additional security and deployment notes:
+- Set `API_KEY` whenever the service is reachable by untrusted clients. The default remains unauthenticated for backwards compatibility, so network-level controls are still recommended.
+- The container runs as UID `10001`; for a bind-mounted Docker cache, make the host directory writable by that UID (for example, `mkdir -p piper-data && sudo chown 10001:10001 piper-data`).
+- Voice downloads are limited in size, validated as non-empty/JSON metadata, and published atomically so concurrent requests cannot consume partial files. The ONNX payload is still trusted from the configured HTTPS source; use a preloaded, reviewed cache for higher-assurance deployments.
 
 Additional tweaks:
 - **Custom Hugging Face mirror**: edit `HF_URL_BASE` in `server.py` if you host the voice files elsewhere.
