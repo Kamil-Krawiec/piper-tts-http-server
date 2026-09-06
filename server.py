@@ -1,22 +1,52 @@
 import argparse
 import asyncio
-import os
+import json
 import logging
+import os
+import re
+import secrets
 import socket
 import subprocess
+import tempfile
+import threading
+from collections.abc import Generator
+from pathlib import Path
+
 import requests
 import uvicorn
-from pathlib import Path
-from typing import Optional, Generator, Union
-
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # --- Configuration ---
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HF_URL_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
-PORT = int(os.getenv("PORT", 5000))
+PORT = int(os.getenv("PORT", "5000"))
+
+# --- Hardening limits (server-side guardrails) ---
+# Bound a single synthesis request so a malicious or accidental payload cannot
+# drive unbounded CPU/memory/disk use (DoS). Strings are capped at character
+# level, lists at segment level, and every Piper numeric knob is range-checked.
+MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "50000"))
+MAX_INPUT_SEGMENTS = int(os.getenv("MAX_INPUT_SEGMENTS", "200"))
+MAX_NAME_LENGTH = int(os.getenv("MAX_NAME_LENGTH", "128"))
+MAX_REQUEST_BODY_BYTES = int(os.getenv("MAX_REQUEST_BODY_BYTES", str(256 * 1024)))
+
+# Optional authentication protects deployments that expose the service beyond
+# a trusted local network without changing the unauthenticated default.
+API_KEY = os.getenv("API_KEY")
+
+# Voice model download guardrails. A voice can be large (100+ MB), so cap the
+# accepted size and never expose a partially-downloaded file as a valid voice.
+MAX_VOICE_BYTES = int(os.getenv("MAX_VOICE_BYTES", str(500 * 1024 * 1024)))
+
+# Subprocess timeouts: Piper synthesis and ffmpeg conversion must never hang a
+# worker thread indefinitely (resource/threadpool exhaustion).
+PIPER_TIMEOUT = int(os.getenv("PIPER_TIMEOUT", "120"))
+FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "60"))
+DEFAULT_NOISE_SCALE = 0.667
+DEFAULT_NOISE_SCALE_W = 0.8
+VOICE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+$")
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -26,12 +56,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger("piper-openai-tts")
 
+
+class RequestBodyLimitMiddleware:
+    """Reject HTTP bodies above the configured limit before JSON parsing."""
+
+    def __init__(self, app, max_bytes: int):
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+            body.extend(message.get("body", b""))
+            if len(body) > self.max_bytes:
+                response_body = b'{"detail":"Request body too large."}'
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 413,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(response_body)).encode()),
+                        ],
+                    }
+                )
+                await send({"type": "http.response.body", "body": response_body})
+                return
+            if not message.get("more_body", False):
+                break
+
+        sent = False
+
+        async def replay_body():
+            nonlocal sent
+            if sent:
+                return await receive()
+            sent = True
+            return {"type": "http.request", "body": bytes(body), "more_body": False}
+
+        await self.app(scope, replay_body, send)
+
+
 # --- FastAPI App ---
 app = FastAPI(
     title="Piper OpenAI TTS",
     description="An OpenAI-compatible audio API wrapper for Piper.",
     version="1.1.0",
 )
+app.add_middleware(RequestBodyLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
 
 
 # --- Data Models ---
@@ -60,73 +141,120 @@ class OpenAISpeechRequest(BaseModel):
 
     model: str = Field(
         ...,
+        min_length=1,
+        max_length=MAX_NAME_LENGTH,
         description="TTS model name (kept for OpenAI compatibility; ignored by Piper).",
     )
-    input: Union[str, list[str]] = Field(
+    input: str | list[str] = Field(
         ..., description="The text to synthesize, or list of text segments."
     )
-    voice: Optional[str] = Field(
+    voice: str | None = Field(
         None,
+        min_length=1,
+        max_length=MAX_NAME_LENGTH,
         description=(
             "Logical voice name (e.g. 'pl_PL-gosia-medium'). "
             "If omitted, `model` will be used as voice name."
         ),
     )
     # OpenAI uses `response_format`; we also accept `format` for lenient clients.
-    format: Optional[str] = Field(
+    format: str | None = Field(
         None,
+        max_length=16,
         description=(
             "Alias for OpenAI's `response_format`. Supported: 'wav', 'mp3'. "
             "Default: 'wav' if not set."
         ),
     )
-    response_format: Optional[str] = Field(
+    response_format: str | None = Field(
         None,
+        max_length=16,
         description="OpenAI field name for audio format (alias for `format`).",
     )
-    speed: Optional[float] = Field(
+    speed: float | None = Field(
         1.0,
         ge=0.25,
         le=4.0,
+        allow_inf_nan=False,
         description="Speech speed multiplier. 1.0 is normal speed.",
     )
 
     # Piper-specific optional parameters (non-standard but harmless extras)
-    noise_scale: Optional[float] = Field(
-        0.667, description="Piper noise scale (controls prosody variation)."
+    # Each is range-checked so extreme values cannot crash or hang Piper.
+    noise_scale: float | None = Field(
+        DEFAULT_NOISE_SCALE,
+        ge=0.0,
+        le=1.5,
+        allow_inf_nan=False,
+        description="Piper noise scale (controls prosody variation).",
     )
-    noise_scale_w: Optional[float] = Field(
-        0.8, description="Piper phoneme noise scale."
+    noise_scale_w: float | None = Field(
+        DEFAULT_NOISE_SCALE_W,
+        ge=0.0,
+        le=1.5,
+        allow_inf_nan=False,
+        description="Piper phoneme noise scale.",
     )
-    length_scale: Optional[float] = Field(
+    length_scale: float | None = Field(
         None,
+        ge=0.1,
+        le=10.0,
+        allow_inf_nan=False,
         description=(
             "Direct Piper length scale. If omitted, derived from `speed` "
             "as length_scale = 1.0 / max(0.1, speed)."
         ),
     )
-    speaker: Optional[int] = Field(
+    speaker: int | None = Field(
         None,
+        ge=0,
+        le=10000,
         description=(
             "Optional numeric speaker ID for multi-speaker Piper models. "
             "Not part of the OpenAI spec but accepted as an extension."
         ),
     )
 
+    @field_validator("input")
+    @classmethod
+    def _validate_input(cls, value: str | list[str]) -> str | list[str]:
+        """Bound the synthesis payload to prevent unbounded resource use."""
+        if isinstance(value, str):
+            chars = len(value)
+            if chars > MAX_INPUT_CHARS:
+                raise ValueError(
+                    f"`input` too long: {chars} characters "
+                    f"(maximum {MAX_INPUT_CHARS})."
+                )
+        elif isinstance(value, list):
+            if len(value) > MAX_INPUT_SEGMENTS:
+                raise ValueError(
+                    f"`input` has too many segments: {len(value)} "
+                    f"(maximum {MAX_INPUT_SEGMENTS})."
+                )
+            total_chars = sum(len(segment) for segment in value)
+            if total_chars > MAX_INPUT_CHARS:
+                raise ValueError(
+                    f"`input` too long: {total_chars} characters total "
+                    f"(maximum {MAX_INPUT_CHARS})."
+                )
+        return value
+
 
 # --- Helper Functions ---
 
 
 def get_voice_paths(voice_name: str):
-    """Return local .onnx and .onnx.json paths for a given Piper voice."""
-    if (
-        "/" in voice_name
-        or "\\" in voice_name
-        or ".." in voice_name
-        or voice_name.startswith(".")
-    ):
+    """Return local .onnx and .onnx.json paths for a safe Piper voice name."""
+    if not VOICE_NAME_RE.fullmatch(voice_name):
         raise ValueError(f"Invalid voice name: {voice_name!r}")
     return DATA_DIR / f"{voice_name}.onnx", DATA_DIR / f"{voice_name}.onnx.json"
+
+
+# Per-voice download locks so two concurrent requests for the same (not yet
+# cached) voice do not both hit Hugging Face and race writing the same files.
+_voice_locks_guard = threading.Lock()
+_voice_locks: dict[str, threading.Lock] = {}
 
 
 def get_installed_voice_catalog() -> list[dict[str, str]]:
@@ -139,58 +267,110 @@ def get_installed_voice_catalog() -> list[dict[str, str]]:
     return sorted(voices, key=lambda voice: voice["id"])
 
 
+def _get_voice_lock(voice_name: str) -> threading.Lock:
+    with _voice_locks_guard:
+        lock = _voice_locks.get(voice_name)
+        if lock is None:
+            lock = threading.Lock()
+            _voice_locks[voice_name] = lock
+        return lock
+
+
+def _parse_voice_repo_path(voice_name: str) -> str:
+    """Build the Hugging Face repo path for a voice, validating its structure."""
+    parts = voice_name.split("-")
+    if len(parts) < 3:
+        raise ValueError("Invalid voice name format")
+    lang_code, name, quality = parts[0], parts[1], parts[2]
+    lang_short = lang_code.split("_")[0]
+    return f"{lang_short}/{lang_code}/{name}/{quality}/{voice_name}"
+
+
 def download_voice_if_missing(voice_name: str) -> bool:
     """
     Ensure that Piper voice files are present locally.
 
-    Voice naming convention is assumed to follow Rhasspy / Piper repos, e.g.:
-    pl_PL-gosia-medium -> pl/pl_PL/gosia/medium/pl_PL-gosia-medium.{onnx,onnx.json}
+    Downloads are written to a temporary path and atomically moved into place
+    only after they validate (non-empty model and parseable JSON metadata), so
+    a partially-downloaded or corrupted voice is never exposed to Piper.
+    A per-voice lock prevents concurrent duplicate downloads.
     """
     try:
         onnx_path, json_path = get_voice_paths(voice_name)
+        repo_path = _parse_voice_repo_path(voice_name)
     except ValueError as exc:
         logger.error("Invalid voice name format: '%s'", voice_name)
         logger.debug("Voice validation error: %s", exc)
         return False
 
-    if onnx_path.exists() and json_path.exists():
-        return True
+    with _get_voice_lock(voice_name):
+        # Re-check after acquiring the lock: another thread may have downloaded.
+        if onnx_path.exists() and json_path.exists():
+            return True
 
-    logger.info("Voice '%s' not found locally. Downloading...", voice_name)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+        logger.info("Voice '%s' not found locally. Downloading...", voice_name)
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+        tmp_paths: list[Path] = []
+
+        try:
+            for ext, target_path in ((".onnx", onnx_path), (".onnx.json", json_path)):
+                url = f"{HF_URL_BASE}/{repo_path}{ext}"
+                logger.info("Downloading voice asset: %s", ext)
+                with tempfile.NamedTemporaryFile(
+                    dir=DATA_DIR,
+                    prefix=f".{voice_name}.",
+                    suffix=".part",
+                    delete=False,
+                ) as tmp_file:
+                    tmp_path = Path(tmp_file.name)
+                    tmp_paths.append(tmp_path)
+                    with requests.get(url, stream=True, timeout=(10, 60)) as response:
+                        response.raise_for_status()
+                        content_length = response.headers.get("content-length")
+                        if content_length and int(content_length) > MAX_VOICE_BYTES:
+                            raise ValueError(
+                                f"Voice exceeds size limit ({MAX_VOICE_BYTES} bytes)"
+                            )
+                        total_bytes = 0
+                        for chunk in response.iter_content(chunk_size=8192):
+                            total_bytes += len(chunk)
+                            if total_bytes > MAX_VOICE_BYTES:
+                                raise ValueError(
+                                    f"Voice exceeds size limit ({MAX_VOICE_BYTES} bytes)"
+                                )
+                            tmp_file.write(chunk)
+
+                if tmp_path.stat().st_size == 0:
+                    raise ValueError("Downloaded voice file is empty")
+                if target_path == json_path:
+                    with tmp_path.open("r", encoding="utf-8") as metadata:
+                        json.load(metadata)
+
+            # Publish only complete, validated files. Both moves stay on DATA_DIR.
+            os.replace(tmp_paths[0], onnx_path)
+            os.replace(tmp_paths[1], json_path)
+            return True
+        except (OSError, ValueError, json.JSONDecodeError, requests.RequestException) as exc:
+            logger.error("Failed to download voice '%s': %s", voice_name, exc)
+            for tmp_path in tmp_paths:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return False
+
+
+def _remove_quietly(path: str) -> None:
+    """Best-effort removal of a file, ignoring errors (used for temp cleanup)."""
     try:
-        parts = voice_name.split("-")
-        if len(parts) < 3:
-            raise ValueError("Invalid voice name format")
-        lang_code, name, quality = parts[0], parts[1], parts[2]
-        lang_short = lang_code.split("_")[0]
-    except Exception:
-        logger.error("Invalid voice name format: '%s'", voice_name)
-        return False
-
-    repo_path = f"{lang_short}/{lang_code}/{name}/{quality}/{voice_name}"
-
-    try:
-        for ext in (".onnx", ".onnx.json"):
-            url = f"{HF_URL_BASE}/{repo_path}{ext}"
-            logger.info("Downloading: %s", url)
-            r = requests.get(url, stream=True, timeout=60)
-            r.raise_for_status()
-            with open(DATA_DIR / f"{voice_name}{ext}", "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        return True
-    except Exception as e:
-        logger.error("Failed to download voice '%s': %s", voice_name, e)
-        if onnx_path.exists():
-            onnx_path.unlink()
-        if json_path.exists():
-            json_path.unlink()
-        return False
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError as e:
+        logger.warning("Failed to remove temporary file '%s': %s", path, e)
 
 
-def normalize_audio_format(target_format: Optional[str]) -> tuple[str, str]:
+def normalize_audio_format(target_format: str | None) -> tuple[str, str]:
     """Validate/normalize audio format and return (format, media_type)."""
     fmt = (target_format or "wav").lower()
     if fmt == "wav":
@@ -238,8 +418,8 @@ def convert_audio_if_needed(
         subprocess.run(
             cmd,
             check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
+            timeout=FFMPEG_TIMEOUT,
         )
         if not os.path.exists(mp3_path):
             logger.error("ffmpeg reported success but MP3 file was not created: %s", mp3_path)
@@ -247,7 +427,16 @@ def convert_audio_if_needed(
                 status_code=500,
                 detail="ffmpeg did not produce the expected MP3 file. Check output path and permissions.",
             )
+    except subprocess.TimeoutExpired:
+        logger.error("ffmpeg conversion timed out after %ss", FFMPEG_TIMEOUT)
+        _remove_quietly(mp3_path)
+        raise HTTPException(
+            status_code=500,
+            detail="ffmpeg conversion timed out. The audio may be too complex to encode.",
+        )
     except subprocess.CalledProcessError as e:
+        # Remove any partially-written MP3 so it cannot be treated as valid output.
+        _remove_quietly(mp3_path)
         logger.error("ffmpeg conversion failed: %s", e.stderr.decode("utf-8", "ignore"))
         raise HTTPException(
             status_code=500,
@@ -271,14 +460,21 @@ def stream_audio_generator(
 
     try:
         # 1) Run Piper to produce WAV file
-        result = subprocess.run(
-            piper_cmd,
-            input=input_text,
-            text=True,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+        try:
+            result = subprocess.run(
+                piper_cmd,
+                input=input_text,
+                text=True,
+                check=False,
+                capture_output=True,
+                timeout=PIPER_TIMEOUT,
+            )
+        except subprocess.TimeoutExpired:
+            logger.error("Piper synthesis timed out after %ss", PIPER_TIMEOUT)
+            raise HTTPException(
+                status_code=500,
+                detail="Audio synthesis timed out. The request may be too large.",
+            )
 
         if result.returncode != 0:
             logger.error("Piper process failed: %s", result.stderr)
@@ -296,26 +492,45 @@ def stream_audio_generator(
 
         # 3) Stream the final audio file (WAV or MP3)
         with open(final_path, "rb") as audio:
-            for chunk in iter(lambda: audio.read(8192), b""):
-                yield chunk
+            yield from iter(lambda: audio.read(8192), b"")
     finally:
         # 4) Cleanup temporary files
         for f in cleanup_files:
-            try:
-                if f and os.path.exists(f):
-                    os.remove(f)
-            except Exception as e:
-                logger.warning("Failed to remove temporary file '%s': %s", f, e)
+            _remove_quietly(f)
 
 
 # --- API Endpoints ---
 
 
+def _check_api_key(request: Request) -> None:
+    """Require a constant-time checked Bearer token when API_KEY is configured."""
+    if not API_KEY:
+        return
+    authorization = request.headers.get("authorization", "")
+    scheme, _, supplied_key = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not secrets.compare_digest(supplied_key, API_KEY):
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthcheck():
+    """Lightweight container/process health endpoint."""
+    return {"status": "ok"}
+
+
 @app.post("/audio/speech", include_in_schema=False)
 @app.post("/v1/audio/speech")
-async def generate_speech(request: OpenAISpeechRequest):
+def generate_speech(request: OpenAISpeechRequest, http_request: Request):
     """
     OpenAI-compatible TTS endpoint.
+
+    This handler is intentionally synchronous: FastAPI runs sync endpoints in a
+    worker thread, so blocking work here (voice download, filesystem, Piper) does
+    not stall the asyncio event loop and lets other requests proceed.
 
     Key behaviors:
     - `voice` is required by the spec; if missing, `model` is used as a fallback
@@ -323,6 +538,8 @@ async def generate_speech(request: OpenAISpeechRequest):
     - `input` may be a string or a list of strings; lists are joined with newlines.
     - `format` / `response_format` supports 'wav' and 'mp3'.
     """
+    _check_api_key(http_request)
+
     # Determine voice name (Piper voice)
     voice_name = request.voice or request.model
     if not voice_name:
@@ -373,8 +590,10 @@ async def generate_speech(request: OpenAISpeechRequest):
     if not download_voice_if_missing(voice_name):
         raise HTTPException(status_code=404, detail=f"Voice '{voice_name}' not found.")
 
-    # Temporary file path for Piper output
-    wav_path = f"/tmp/piper_{os.getpid()}_{os.urandom(4).hex()}.wav"
+    # Secure temporary file for Piper output (O_EXCL, random name). The file is
+    # created empty and Piper truncates/overwrites it via wave.open(..., "wb").
+    wav_fd, wav_path = tempfile.mkstemp(prefix="piper_", suffix=".wav")
+    os.close(wav_fd)
 
     # Derive Piper length scale from speed if not explicitly set
     if request.length_scale is not None:
@@ -392,9 +611,9 @@ async def generate_speech(request: OpenAISpeechRequest):
         "--length-scale",
         str(final_length_scale),
         "--noise-scale",
-        str(request.noise_scale),
+        str(request.noise_scale if request.noise_scale is not None else DEFAULT_NOISE_SCALE),
         "--noise-w",
-        str(request.noise_scale_w),
+        str(request.noise_scale_w if request.noise_scale_w is not None else DEFAULT_NOISE_SCALE_W),
     ]
 
     # Optional speaker ID (multi-speaker models only)
@@ -414,22 +633,24 @@ async def generate_speech(request: OpenAISpeechRequest):
 
 @app.get("/audio/voices", include_in_schema=False)
 @app.get("/v1/audio/voices")
-async def list_voices():
+def list_voices(http_request: Request):
     """List installed Piper voices for OpenAI-compatible clients."""
+    _check_api_key(http_request)
     return {"voices": get_installed_voice_catalog()}
 
 
 @app.get("/audio/models", include_in_schema=False)
 @app.get("/v1/audio/models")
-async def list_models():
+def list_models(http_request: Request):
     """List installed Piper voice models for OpenAI-compatible clients."""
+    _check_api_key(http_request)
     return {"models": get_installed_voice_catalog()}
 
 
 class _ActivatedSocket(socket.socket):
     """Socket that skips listen() — already done by systemd."""
 
-    def listen(self, __backlog: int = 0) -> None:  # noqa: D102
+    def listen(self, __backlog: int = 0, /) -> None:
         pass
 
 

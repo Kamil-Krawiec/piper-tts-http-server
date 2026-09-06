@@ -1,6 +1,12 @@
-fastapi==0.109.0
+# HTTP framework. patched to 0.109.1 (CVE-2024-24762 / PYSEC-2024-38, a ReDoS in
+# python-multipart form parsing). This service accepts JSON bodies only, so the
+# affected code path is not reachable, but the patch bump is low-risk.
+fastapi==0.109.1
 uvicorn==0.27.0
-requests==2.31.0
+# 2.34.2 fixes CVE-2024-35195 (main certificate verification bypass) and
+# CVE-2024-47081 (.netrc credential leak), plus the later 2026 CVEs reported for
+# 2.31.0. Reachable: voice models are downloaded over HTTPS via requests.
+requests==2.34.2
 piper-tts==1.3.0
 pydantic==2.6.0
 httpx==0.27.2

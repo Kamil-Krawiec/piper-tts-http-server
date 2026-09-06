@@ -45,7 +45,7 @@ def client_with_stubs(monkeypatch, tmp_path):
 
         return wav_path, "audio/wav", []
 
-    def fake_run(cmd, input=None, text=None, check=None, stdout=None, stderr=None):
+    def fake_run(cmd, input=None, text=None, check=None, **_kwargs):
         """Stub Piper CLI: write fake bytes to the output file and record the command."""
         output_index = cmd.index("--output_file") + 1
         output_path = cmd[output_index]
@@ -71,6 +71,8 @@ def test_generate_speech_streams_audio(client_with_stubs):
             "input": ["Hello", "from Piper"],
             "format": "wav",
             "speed": 2.0,
+            "noise_scale": None,
+            "noise_scale_w": None,
         },
     )
 
@@ -85,6 +87,8 @@ def test_generate_speech_streams_audio(client_with_stubs):
     # Check that length-scale is derived as 1 / speed
     assert "--length-scale" in cmds[0]
     assert cmds[0][cmds[0].index("--length-scale") + 1] == "0.5"
+    assert cmds[0][cmds[0].index("--noise-scale") + 1] == str(server.DEFAULT_NOISE_SCALE)
+    assert cmds[0][cmds[0].index("--noise-w") + 1] == str(server.DEFAULT_NOISE_SCALE_W)
 
     # For this request we explicitly set format="wav"
     assert formats == ["wav"]
