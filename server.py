@@ -14,7 +14,7 @@ from typing import Optional, Generator, Union
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 # --- Configuration ---
@@ -39,6 +39,11 @@ MAX_VOICE_BYTES = int(os.getenv("MAX_VOICE_BYTES", "524288000"))
 PIPER_TIMEOUT = int(os.getenv("PIPER_TIMEOUT", "120"))
 FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT", "60"))
 
+# Reject request bodies above this size before they are read into memory.
+# Default 2 MiB is far above any legitimate synthesis request (max input is
+# 50k characters of JSON).
+MAX_REQUEST_BYTES = int(os.getenv("MAX_REQUEST_BYTES", "2097152"))
+
 # --- Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +58,22 @@ app = FastAPI(
     description="An OpenAI-compatible audio API wrapper for Piper.",
     version="1.1.0",
 )
+
+
+@app.middleware("http")
+async def limit_request_body(request, call_next):
+    """Reject oversized request bodies before they are buffered into memory."""
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_REQUEST_BYTES:
+                return JSONResponse(
+                    status_code=413, content={"detail": "Request body too large."}
+                )
+        except ValueError:
+            # Malformed Content-Length header; let the server handle it downstream.
+            pass
+    return await call_next(request)
 
 
 # --- Data Models ---

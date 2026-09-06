@@ -85,6 +85,17 @@ def test_voice_name_with_null_byte_rejected():
     assert "Invalid voice name" in resp.json()["detail"]
 
 
+def test_oversized_request_body_rejected_413(monkeypatch):
+    monkeypatch.setattr(server, "MAX_REQUEST_BYTES", 100)
+    client = TestClient(server.app)
+    body = json.dumps({"model": "demo-voice", "input": "x" * 400})
+    resp = client.post(
+        "/v1/audio/speech", content=body, headers={"Content-Type": "application/json"}
+    )
+    assert resp.status_code == 413
+    assert resp.json()["detail"] == "Request body too large."
+
+
 # --------------------------------------------------------------------------- #
 # Voice download: atomic writes + validation + no leftovers
 # --------------------------------------------------------------------------- #
