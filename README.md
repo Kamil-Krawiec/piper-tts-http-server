@@ -57,6 +57,14 @@ docker run --rm -p 5000:5000 -v "$(pwd)/piper-data:/data" my-piper-tts
 
 The published image already contains `espeak-ng`, `libsndfile1`, and `ffmpeg` for MP3 conversion.
 
+The container runs as an **unprivileged user** (UID 1000) rather than root. If you
+bind-mount a host directory to `/data`, make sure it is writable by that UID, for
+example:
+```bash
+mkdir -p ./piper-data && sudo chown -R 1000:1000 ./piper-data
+```
+A Docker named volume (`-v piper-voices:/data`) is handled automatically.
+
 ### systemd socket activation (Podman Quadlet)
 
 Socket activation lets systemd own the listening port and start the container on demand — zero resource usage when idle, instant recovery on crash, and no manual `docker run` needed.
@@ -160,12 +168,19 @@ curl -o output.wav \
 |----------------------|---------|---------|
 | `DATA_DIR`           | `/data` | Location where voice files are cached. Mount/persist this when using Docker. |
 | `PORT`               | `5000`  | Port that Uvicorn binds to. |
+| `MAX_INPUT_CHARS`    | `50000` | Max characters in a single synthesis request (protects against runaway synthesis). |
+| `MAX_INPUT_SEGMENTS` | `200`   | Max segments a list `input` may contain. |
+| `MAX_NAME_LENGTH`    | `128`   | Max length for `model` / `voice` names. |
+| `MAX_VOICE_BYTES`    | `524288000` | Max size (bytes) of a downloaded voice; larger downloads are rejected. |
+| `PIPER_TIMEOUT`      | `120`   | Seconds before Piper synthesis is killed and reported as a timeout. |
+| `FFMPEG_TIMEOUT`     | `60`    | Seconds before ffmpeg conversion is killed and reported as a timeout. |
 
 Additional tweaks:
 - **Custom Hugging Face mirror**: edit `HF_URL_BASE` in `server.py` if you host the voice files elsewhere.
 - **Alternative Piper args**: adjust how `piper_cmd` is built in `server.py` to include extra Piper flags (e.g., `--speaker`).
 - **MP3 output**: `ffmpeg` is included in the Docker image; if running locally, ensure it is installed so `response_format="mp3"` succeeds.
 - **Logging**: synthesis parameters are logged at `INFO` without recording the input text; `logging.basicConfig` is defined at the top of `server.py` if you need to adjust the level or format.
+- **Downloaded voices are validated**: each voice model and its metadata are written to a temp file, checked (non-empty model, parseable JSON metadata), then atomically moved into place. A partially-downloaded or corrupted voice is never used, and concurrent requests for the same new voice share a single download.
 
 ---
 

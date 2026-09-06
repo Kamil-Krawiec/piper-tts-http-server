@@ -1,0 +1,22 @@
+# Version control / CI, not needed in the build context
+.git
+.github
+
+# Python caches and virtualenvs
+__pycache__
+*.py[cod]
+*.pyo
+.venv
+venv
+piper-tts
+.pytest_cache
+.coverage
+
+# Downloaded voice cache (very large; not needed to build the image)
+piper-data
+
+# Files not used by the runtime image
+tests
+systemd
+*.md
+LICENSE

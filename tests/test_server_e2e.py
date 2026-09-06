@@ -45,7 +45,7 @@ def client_with_stubs(monkeypatch, tmp_path):
 
         return wav_path, "audio/wav", []
 
-    def fake_run(cmd, input=None, text=None, check=None, stdout=None, stderr=None):
+    def fake_run(cmd, input=None, text=None, check=None, stdout=None, stderr=None, timeout=None):
         """Stub Piper CLI: write fake bytes to the output file and record the command."""
         output_index = cmd.index("--output_file") + 1
         output_path = cmd[output_index]
