@@ -8,6 +8,11 @@ on:
     types: [ published ]
   workflow_dispatch:
   
+# Least privilege: this job only reads the repository; it authenticates to
+# Docker Hub via repository secrets, not the GITHUB_TOKEN.
+permissions:
+  contents: read
+
 env:
   IMAGE_NAME: kamilkrawiec/piper-openai-tts
 
