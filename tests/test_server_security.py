@@ -192,6 +192,24 @@ def test_download_voice_if_missing_oversized_not_published(data_dir, monkeypatch
     assert not list(data_dir.glob("*.tmp"))
 
 
+def test_download_voice_if_missing_stream_over_limit_not_published(data_dir, monkeypatch):
+    # No content-length header at all; the streamed bytes themselves exceed the cap.
+    monkeypatch.setattr(server, "MAX_VOICE_BYTES", 100)
+
+    def fake_get(url, stream=True, timeout=None):
+        if url.endswith(".onnx"):
+            return _FakeResponse(url, chunks=[b"x" * 64] * 10)  # 640 bytes > 100
+        return _FakeResponse(url, chunks=[b'{"sample_rate": 22050}'])
+
+    monkeypatch.setattr(server.requests, "get", fake_get)
+    onnx_path, json_path = server.get_voice_paths("en_US-test-medium")
+
+    assert server.download_voice_if_missing("en_US-test-medium") is False
+    assert not onnx_path.exists()
+    assert not json_path.exists()
+    assert not list(data_dir.glob("*.tmp"))
+
+
 def test_download_voice_if_missing_invalid_json_not_published(data_dir, monkeypatch):
     _install_fake_get(monkeypatch, json_invalid=True)
     onnx_path, json_path = server.get_voice_paths("en_US-test-medium")

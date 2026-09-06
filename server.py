@@ -278,9 +278,15 @@ def download_voice_if_missing(voice_name: str) -> bool:
                         raise ValueError(
                             f"Voice exceeds size limit ({MAX_VOICE_BYTES} bytes)"
                         )
+                    written = 0
                     with open(tmp_path, "wb") as f:
                         for chunk in r.iter_content(chunk_size=8192):
                             f.write(chunk)
+                            written += len(chunk)
+                            if written > MAX_VOICE_BYTES:
+                                raise ValueError(
+                                    f"Voice exceeds size limit ({MAX_VOICE_BYTES} bytes)"
+                                )
 
                 # Validate the downloaded artifact before publishing it.
                 if not tmp_path.exists() or tmp_path.stat().st_size == 0:
