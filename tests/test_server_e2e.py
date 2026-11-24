@@ -267,6 +267,32 @@ def test_audio_routes_require_api_key(api_key, method, endpoint, prefix):
     assert response.headers["WWW-Authenticate"] == "Bearer"
 
 
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+@pytest.mark.parametrize("credential", [None, "incorrect", "correct"])
+def test_documentation_requires_valid_api_key(api_key, path, credential):
+    headers = {}
+    if credential is not None:
+        token = api_key if credential == "correct" else credential
+        headers["Authorization"] = f"Bearer {token}"
+
+    with TestClient(server.app) as anonymous:
+        response = anonymous.get(path, headers=headers)
+
+    if credential == "correct":
+        assert response.status_code == 200
+    else:
+        assert response.status_code == 401
+        assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_healthz_is_public_with_api_key_configured(api_key):
+    with TestClient(server.app) as anonymous:
+        response = anonymous.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 @pytest.mark.parametrize("value", ["", "Bearer", "Basic invalid", "Bearer incorrect"])
 def test_invalid_authorization_returns_generic_challenge(api_key, value):
     with TestClient(server.app) as anonymous:

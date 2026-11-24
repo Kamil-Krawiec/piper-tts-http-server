@@ -25,6 +25,27 @@ def test_get_voice_paths_rejects_path_traversal():
         server.get_voice_paths(".hidden")
 
 
+@pytest.mark.parametrize(
+    "voice_name",
+    ["", "a\x00b", "a\nb", "a" * 246, "é" * 123],
+    ids=["empty", "nul", "newline", "ascii-over-limit", "utf8-over-limit"],
+)
+def test_get_voice_paths_rejects_invalid_local_names(voice_name):
+    with pytest.raises(ValueError, match="Invalid voice name"):
+        server.get_voice_paths(voice_name)
+
+
+@pytest.mark.parametrize("separator", ["?", "#", "%"])
+def test_remote_voice_name_rejects_url_metacharacters(separator, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+    def unexpected_download(*args, **kwargs):
+        pytest.fail("Invalid remote voice name reached the download step")
+
+    monkeypatch.setattr(server.requests, "get", unexpected_download)
+    assert server.download_voice_if_missing(f"en_US-example{separator}voice-medium") is False
+
+
 def test_get_installed_voice_catalog_lists_complete_pairs_in_stable_order(
     monkeypatch, tmp_path
 ):
