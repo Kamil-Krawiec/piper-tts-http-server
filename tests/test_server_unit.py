@@ -25,6 +25,27 @@ def test_get_voice_paths_rejects_path_traversal():
         server.get_voice_paths(".hidden")
 
 
+@pytest.mark.parametrize(
+    "voice_name",
+    ["", "a\x00b", "a\nb", "a" * 246, "é" * 123],
+    ids=["empty", "nul", "newline", "ascii-over-limit", "utf8-over-limit"],
+)
+def test_get_voice_paths_rejects_invalid_local_names(voice_name):
+    with pytest.raises(ValueError, match="Invalid voice name"):
+        server.get_voice_paths(voice_name)
+
+
+@pytest.mark.parametrize("separator", ["?", "#", "%"])
+def test_remote_voice_name_rejects_url_metacharacters(separator, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+
+    def unexpected_download(*args, **kwargs):
+        pytest.fail("Invalid remote voice name reached the download step")
+
+    monkeypatch.setattr(server.requests, "get", unexpected_download)
+    assert server.download_voice_if_missing(f"en_US-example{separator}voice-medium") is False
+
+
 def test_get_installed_voice_catalog_lists_complete_pairs_in_stable_order(
     monkeypatch, tmp_path
 ):
@@ -79,7 +100,8 @@ def test_convert_audio_if_needed_converts_to_mp3(monkeypatch, tmp_path):
 def test_download_voice_if_missing_uses_existing_files(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
 
-    voice_name = "en_US-test-low"
+    voice_name = "custom_voice"
+    monkeypatch.setattr(server.requests, "get", lambda *args, **kwargs: pytest.fail("cache miss"))
     onnx_path, json_path = server.get_voice_paths(voice_name)
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     onnx_path.write_bytes(b"onnx-bytes")

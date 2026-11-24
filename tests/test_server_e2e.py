@@ -1,4 +1,5 @@
 import logging
+import secrets
 import subprocess
 from pathlib import Path
 
@@ -9,7 +10,19 @@ import server
 
 
 @pytest.fixture
-def client_with_stubs(monkeypatch, tmp_path):
+def api_key(monkeypatch):
+    key = secrets.token_urlsafe(32)
+    monkeypatch.setenv("API_KEY", key)
+    return key
+
+
+@pytest.fixture
+def client(api_key):
+    return TestClient(server.app, headers={"Authorization": f"Bearer {api_key}"})
+
+
+@pytest.fixture
+def client_with_stubs(client, monkeypatch, tmp_path):
     """Create a TestClient with Piper + conversion stubbed out.
 
     - DATA_DIR points into a temporary folder
@@ -57,7 +70,6 @@ def client_with_stubs(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "convert_audio_if_needed", fake_convert_audio)
     monkeypatch.setattr(server.subprocess, "run", fake_run)
 
-    client = TestClient(server.app)
     return client, recorded_cmds, recorded_formats, data_dir
 
 
@@ -206,11 +218,10 @@ def test_discovery_endpoints_list_installed_voices(client_with_stubs, prefix):
     assert models_response.json() == {"models": expected}
 
 
-def test_missing_voice_returns_404(monkeypatch):
+def test_missing_voice_returns_404(client, monkeypatch):
     # Force download_voice_if_missing to "fail"
     monkeypatch.setattr(server, "download_voice_if_missing", lambda _voice: False)
 
-    client = TestClient(server.app)
     response = client.post(
         "/v1/audio/speech",
         json={"model": "demo-voice", "input": "hello world"},
@@ -220,8 +231,7 @@ def test_missing_voice_returns_404(monkeypatch):
     assert response.json()["detail"] == "Voice 'demo-voice' not found."
 
 
-def test_path_traversal_voice_name_rejected():
-    client = TestClient(server.app)
+def test_path_traversal_voice_name_rejected(client):
 
     response = client.post(
         "/v1/audio/speech",
@@ -242,3 +252,78 @@ def test_empty_input_rejected(client_with_stubs):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "`input` text must not be empty."
+
+
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+@pytest.mark.parametrize("method, endpoint", [
+    ("POST", "speech"),
+    ("GET", "voices"),
+    ("GET", "models"),
+])
+def test_audio_routes_require_api_key(api_key, method, endpoint, prefix):
+    with TestClient(server.app) as anonymous:
+        response = anonymous.request(method, f"{prefix}/audio/{endpoint}")
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+@pytest.mark.parametrize("credential", [None, "incorrect", "correct"])
+def test_documentation_requires_valid_api_key(api_key, path, credential):
+    headers = {}
+    if credential is not None:
+        token = api_key if credential == "correct" else credential
+        headers["Authorization"] = f"Bearer {token}"
+
+    with TestClient(server.app) as anonymous:
+        response = anonymous.get(path, headers=headers)
+
+    if credential == "correct":
+        assert response.status_code == 200
+    else:
+        assert response.status_code == 401
+        assert response.headers["WWW-Authenticate"] == "Bearer"
+
+
+def test_healthz_is_public_with_api_key_configured(api_key):
+    with TestClient(server.app) as anonymous:
+        response = anonymous.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.parametrize("value", ["", "Bearer", "Basic invalid", "Bearer incorrect"])
+def test_invalid_authorization_returns_generic_challenge(api_key, value):
+    with TestClient(server.app) as anonymous:
+        response = anonymous.get("/v1/audio/voices", headers={"Authorization": value})
+    assert response.status_code == 401
+    assert response.headers["WWW-Authenticate"] == "Bearer"
+    assert response.json() == {"detail": "Invalid or missing API key"}
+
+
+def test_bearer_scheme_is_case_insensitive_and_key_is_not_logged(api_key, monkeypatch, tmp_path, caplog):
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    with caplog.at_level(logging.INFO), TestClient(server.app) as anonymous:
+        response = anonymous.get("/v1/audio/models", headers={"Authorization": f"bEaReR {api_key}"})
+    assert response.status_code == 200
+    assert api_key not in caplog.text
+    assert api_key not in response.text
+
+
+def test_duplicate_authorization_headers_are_rejected(api_key):
+    headers = [("Authorization", f"Bearer {api_key}")] * 2
+    with TestClient(server.app) as anonymous:
+        assert anonymous.get("/v1/audio/voices", headers=headers).status_code == 401
+
+
+@pytest.mark.parametrize("value", [None, "", "  ", "invalid key"])
+def test_invalid_configuration_fails_closed_but_keeps_liveness(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("API_KEY", value)
+    with TestClient(server.app) as anonymous:
+        assert anonymous.get("/healthz").json() == {"status": "ok"}
+        assert anonymous.get("/v1/audio/voices").status_code == 503
+        assert anonymous.post("/v1/audio/speech").status_code == 503
