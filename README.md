@@ -22,6 +22,27 @@ Run it locally or in Docker; it auto-downloads Rhasspy Piper voices on demand an
 
 ## Getting Started
 
+### API key
+
+Set a strong, random key before starting the server. For a local session, generate one
+without printing it:
+
+```bash
+export API_KEY="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+Configure clients with the same key using `Authorization: Bearer <key>`.
+In Open WebUI, set the OpenAI TTS API key to this value. Send requests over HTTPS
+when connecting from another machine. For persistent deployments, store the key
+in a secret store or a private environment file outside the repository, and restart
+the server and update clients when rotating it.
+
+Missing or invalid credentials return `401` with `WWW-Authenticate: Bearer`.
+An unset, empty, or malformed server key disables protected routes with `503`.
+This applies to both versioned and unversioned audio routes and to the interactive
+docs and OpenAPI schema. `GET /healthz` remains public for liveness checks and
+reports only that the HTTP server is responding.
+
 ### Local Python environment
 Install system dependencies (Debian/Ubuntu example):
 ```bash
@@ -45,6 +66,7 @@ Pull the pre-built image from Docker Hub and mount a persistent data directory f
 docker run --rm \
   -p 5000:5000 \
   -e PORT=5000 \
+  -e API_KEY \
   -v "$(pwd)/piper-data:/data" \
   kamilkrawiec/piper-openai-tts
 ```
@@ -52,7 +74,7 @@ docker run --rm \
 Need to customize the image? Build it locally:
 ```bash
 docker build -t my-piper-tts .
-docker run --rm -p 5000:5000 -v "$(pwd)/piper-data:/data" my-piper-tts
+docker run --rm -p 5000:5000 -e API_KEY -v "$(pwd)/piper-data:/data" my-piper-tts
 ```
 
 The published image already contains `espeak-ng`, `libsndfile1`, and `ffmpeg` for MP3 conversion.
@@ -63,7 +85,7 @@ Socket activation lets systemd own the listening port and start the container on
 
 1. Prepare the voice data directory:
    ```bash
-   mkdir -p ~/.local/share/piper-tts/
+   mkdir -p ~/.local/share/piper-tts/ ~/.config/systemd/user ~/.config/containers/systemd
    ```
 
 2. Copy the unit files:
@@ -72,7 +94,18 @@ Socket activation lets systemd own the listening port and start the container on
    cp systemd/piper-tts.container ~/.config/containers/systemd/
    ```
 
-3. Reload and enable:
+3. Create a private environment file from the exported key and reference it
+   from the `[Container]` section of the copied `piper-tts.container`:
+
+   ```bash
+   (umask 077; set -o noclobber; printf 'API_KEY=%s\n' "${API_KEY:?Set API_KEY first}" > ~/.config/containers/systemd/piper-tts.env)
+   ```
+
+   ```ini
+   EnvironmentFile=%h/.config/containers/systemd/piper-tts.env
+   ```
+
+4. Reload and enable:
    ```bash
    systemctl --user daemon-reload
    systemctl --user enable --now piper-tts.socket
@@ -81,6 +114,7 @@ Socket activation lets systemd own the listening port and start the container on
 The container starts automatically on the first request to port 5000. Verify with:
 ```bash
 curl -s -o /dev/null -w '%{http_code}' \
+  -H "Authorization: Bearer ${API_KEY}" \
   -H 'Content-Type: application/json' \
   -d '{"model":"piper","voice":"en_US-lessac-medium","input":"Hello"}' \
   http://localhost:5000/v1/audio/speech
@@ -115,6 +149,8 @@ Open WebUI may be configured with either `http://<piper-host>:5000` or `http://<
 ### Example (Python)
 
 ```python
+import os
+
 import requests
 
 payload = {
@@ -128,7 +164,13 @@ payload = {
     "noise_scale": 0.6
 }
 
-r = requests.post("http://localhost:5000/v1/audio/speech", json=payload, stream=True)
+r = requests.post(
+    "http://localhost:5000/v1/audio/speech",
+    headers={"Authorization": f"Bearer {os.environ['API_KEY']}"},
+    json=payload,
+    stream=True,
+)
+r.raise_for_status()
 with open("output.wav", "wb") as f:
     for chunk in r.iter_content(chunk_size=8192):
         f.write(chunk)
@@ -137,7 +179,8 @@ with open("output.wav", "wb") as f:
 ### Example (curl)
 
 ```bash
-curl -o output.wav \
+curl --fail -o output.wav \
+  -H "Authorization: Bearer ${API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"model":"piper","voice":"en_US-lessac-high","input":"Hello from Piper!"}' \
   http://localhost:5000/v1/audio/speech
@@ -150,7 +193,9 @@ curl -o output.wav \
 - When a voice is requested for the first time, the server downloads `<voice>.onnx` and `<voice>.onnx.json` to `DATA_DIR`.
 - To preload voices, place both files in `DATA_DIR` ahead of time.
 - Remove cached voices by deleting their ONNX/JSON files; they will be re-downloaded on the next request.
-- Voice names are validated to prevent path traversal, so stick to canonical names from `rhasspy/piper-voices`.
+- Automatic downloads require canonical names from `rhasspy/piper-voices`. Custom names work for preloaded pairs.
+- Downloads are limited to 512 MiB for the model and 1 MiB for metadata. Both files are staged before publication, and metadata must parse as a JSON object.
+- Use one server process per voice cache, or give each process its own cache directory.
 
 ---
 
@@ -158,6 +203,7 @@ curl -o output.wav \
 
 | Environment variable | Default | Purpose |
 |----------------------|---------|---------|
+| `API_KEY` | Required | Shared Bearer token. Use a random URL-safe value. |
 | `DATA_DIR`           | `/data` | Location where voice files are cached. Mount/persist this when using Docker. |
 | `PORT`               | `5000`  | Port that Uvicorn binds to. |
 
@@ -170,7 +216,7 @@ Additional tweaks:
 ---
 
 ## How It Works
-1. FastAPI receives the request and validates it with Pydantic.
+1. The server authenticates the request before FastAPI validates the payload with Pydantic.
 2. The server ensures the requested voice exists locally, downloading it from Hugging Face if missing.
 3. Piper is invoked via the `piper` CLI (shipped through the `piper-tts` dependency) with the requested parameters.
 4. The resulting audio is streamed back (converted to MP3 via `ffmpeg` if requested), and temporary files are cleaned up from `/tmp`.
@@ -178,6 +224,12 @@ Additional tweaks:
 Dependencies are declared in `requirements.txt` (FastAPI, Uvicorn, Requests, `piper-tts`, Pydantic). System packages (`espeak-ng`, `libsndfile1`, `ffmpeg`) are provided by the Docker image; if running outside Docker, install the same packages locally for best parity.
 
 ---
+
+## Running tests
+
+Install the requirements and run `python -m pip install pytest` followed by
+`python -m pytest -q`. Tests supply their own disposable keys and stub voice downloads
+and audio subprocesses.
 
 ## Contributing & Support
 - Issues and pull requests are welcome for bug fixes, new documentation, or feature enhancements.
