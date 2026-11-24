@@ -24,7 +24,7 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HF_URL_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
 PORT = int(os.getenv("PORT", 5000))
 REMOTE_VOICE = re.compile(
-    r"(([a-z]{2,3})_[A-Z]{2})-([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*)-(x_low|low|medium|high)"
+    r"(([a-z]{2,3})_[A-Z]{2})-(\w+(?:-\w+)*)-(x_low|low|medium|high)"
 )
 VOICE_BYTES_LIMIT = 512 * 1024 * 1024
 METADATA_BYTES_LIMIT = 1024 * 1024
@@ -198,6 +198,10 @@ def download_voice_if_missing(voice_name: str) -> bool:
         onnx_path, json_path = get_voice_paths(voice_name)
     except ValueError:
         return False
+
+    with publication_lock:
+        if onnx_path.is_file() and json_path.is_file():
+            return True
 
     with download_lock:
         if onnx_path.is_file() and json_path.is_file():
