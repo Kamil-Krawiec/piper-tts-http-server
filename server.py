@@ -1,5 +1,8 @@
 import argparse
 import asyncio
+import hashlib
+import hmac
+import re
 import os
 import logging
 import socket
@@ -9,8 +12,8 @@ import uvicorn
 from pathlib import Path
 from typing import Optional, Generator, Union
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 # --- Configuration ---
@@ -32,6 +35,42 @@ app = FastAPI(
     description="An OpenAI-compatible audio API wrapper for Piper.",
     version="1.1.0",
 )
+
+
+BEARER_TOKEN = re.compile(r"[A-Za-z0-9._~+/-]+=*", re.ASCII)
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if request.method == "GET" and request.scope["path"] == "/healthz":
+        return await call_next(request)
+
+    key = os.getenv("API_KEY", "")
+    if not BEARER_TOKEN.fullmatch(key):
+        return JSONResponse({"detail": "API key is not configured"}, status_code=503)
+
+    headers = request.headers.getlist("authorization")
+    scheme, _, token = headers[0].partition(" ") if len(headers) == 1 else ("", "", "")
+    token = token.lstrip(" ")
+    if (
+        scheme.lower() != "bearer"
+        or not BEARER_TOKEN.fullmatch(token)
+        or not hmac.compare_digest(
+            hashlib.sha256(token.encode("ascii")).digest(),
+            hashlib.sha256(key.encode("ascii")).digest(),
+        )
+    ):
+        return JSONResponse(
+            {"detail": "Invalid or missing API key"},
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return await call_next(request)
+
+
+@app.get("/healthz", include_in_schema=False)
+async def healthz():
+    return {"status": "ok"}
 
 
 # --- Data Models ---
