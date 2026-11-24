@@ -79,7 +79,8 @@ def test_convert_audio_if_needed_converts_to_mp3(monkeypatch, tmp_path):
 def test_download_voice_if_missing_uses_existing_files(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
 
-    voice_name = "en_US-test-low"
+    voice_name = "custom_voice"
+    monkeypatch.setattr(server.requests, "get", lambda *args, **kwargs: pytest.fail("cache miss"))
     onnx_path, json_path = server.get_voice_paths(voice_name)
     onnx_path.parent.mkdir(parents=True, exist_ok=True)
     onnx_path.write_bytes(b"onnx-bytes")

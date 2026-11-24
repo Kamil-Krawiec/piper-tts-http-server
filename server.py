@@ -2,11 +2,14 @@ import argparse
 import asyncio
 import hashlib
 import hmac
+import json
 import re
 import os
 import logging
 import socket
 import subprocess
+import tempfile
+import threading
 import requests
 import uvicorn
 from pathlib import Path
@@ -20,6 +23,13 @@ from pydantic import BaseModel, Field
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 HF_URL_BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0"
 PORT = int(os.getenv("PORT", 5000))
+REMOTE_VOICE = re.compile(
+    r"(([a-z]{2,3})_[A-Z]{2})-([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*)-(x_low|low|medium|high)"
+)
+VOICE_BYTES_LIMIT = 512 * 1024 * 1024
+METADATA_BYTES_LIMIT = 1024 * 1024
+download_lock = threading.Lock()
+publication_lock = threading.Lock()
 
 # --- Logging Setup ---
 logging.basicConfig(
@@ -159,7 +169,10 @@ class OpenAISpeechRequest(BaseModel):
 def get_voice_paths(voice_name: str):
     """Return local .onnx and .onnx.json paths for a given Piper voice."""
     if (
-        "/" in voice_name
+        not voice_name
+        or not voice_name.isprintable()
+        or len(voice_name.encode("utf-8")) > 245
+        or "/" in voice_name
         or "\\" in voice_name
         or ".." in voice_name
         or voice_name.startswith(".")
@@ -170,63 +183,80 @@ def get_voice_paths(voice_name: str):
 
 def get_installed_voice_catalog() -> list[dict[str, str]]:
     """Return locally installed, runnable Piper voices in stable order."""
-    voices = []
-    for onnx_path in DATA_DIR.glob("*.onnx"):
-        voice_name = onnx_path.stem
-        if onnx_path.is_file() and onnx_path.with_suffix(".onnx.json").is_file():
-            voices.append({"id": voice_name, "name": voice_name})
+    with publication_lock:
+        voices = [
+            {"id": onnx_path.stem, "name": onnx_path.stem}
+            for onnx_path in DATA_DIR.glob("*.onnx")
+            if onnx_path.is_file() and onnx_path.with_suffix(".onnx.json").is_file()
+        ]
     return sorted(voices, key=lambda voice: voice["id"])
 
 
 def download_voice_if_missing(voice_name: str) -> bool:
-    """
-    Ensure that Piper voice files are present locally.
-
-    Voice naming convention is assumed to follow Rhasspy / Piper repos, e.g.:
-    pl_PL-gosia-medium -> pl/pl_PL/gosia/medium/pl_PL-gosia-medium.{onnx,onnx.json}
-    """
+    """Reuse a local voice or stage and validate both remote assets before publishing."""
     try:
         onnx_path, json_path = get_voice_paths(voice_name)
-    except ValueError as exc:
-        logger.error("Invalid voice name format: '%s'", voice_name)
-        logger.debug("Voice validation error: %s", exc)
+    except ValueError:
         return False
 
-    if onnx_path.exists() and json_path.exists():
-        return True
+    with download_lock:
+        if onnx_path.is_file() and json_path.is_file():
+            return True
 
-    logger.info("Voice '%s' not found locally. Downloading...", voice_name)
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+        match = REMOTE_VOICE.fullmatch(voice_name)
+        if not match:
+            return False
+        lang_code, lang_short, name, quality = match.groups()
+        base_url = f"{HF_URL_BASE}/{lang_short}/{lang_code}/{name}/{quality}/{voice_name}"
+        staged = {}
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            for target, suffix, limit in (
+                (onnx_path, ".onnx", VOICE_BYTES_LIMIT),
+                (json_path, ".onnx.json", METADATA_BYTES_LIMIT),
+            ):
+                with tempfile.NamedTemporaryFile(
+                    dir=DATA_DIR, prefix=".voice-", suffix=".part", delete=False
+                ) as asset:
+                    staged[target] = Path(asset.name)
+                    with requests.get(
+                        f"{base_url}{suffix}", stream=True, timeout=(10, 60)
+                    ) as response:
+                        response.raise_for_status()
+                        size = 0
+                        for chunk in response.iter_content(chunk_size=8192):
+                            size += len(chunk)
+                            if size > limit:
+                                raise ValueError("Voice asset exceeds size limit")
+                            asset.write(chunk)
+                        if size == 0:
+                            raise ValueError("Voice asset is empty")
 
-    try:
-        parts = voice_name.split("-")
-        if len(parts) < 3:
-            raise ValueError("Invalid voice name format")
-        lang_code, name, quality = parts[0], parts[1], parts[2]
-        lang_short = lang_code.split("_")[0]
-    except Exception:
-        logger.error("Invalid voice name format: '%s'", voice_name)
-        return False
+            with staged[json_path].open(encoding="utf-8") as metadata:
+                if not isinstance(json.load(metadata), dict):
+                    raise ValueError("Voice metadata must be a JSON object")
 
-    repo_path = f"{lang_short}/{lang_code}/{name}/{quality}/{voice_name}"
-
-    try:
-        for ext in (".onnx", ".onnx.json"):
-            url = f"{HF_URL_BASE}/{repo_path}{ext}"
-            logger.info("Downloading: %s", url)
-            r = requests.get(url, stream=True, timeout=60)
-            r.raise_for_status()
-            with open(DATA_DIR / f"{voice_name}{ext}", "wb") as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        return True
-    except Exception as e:
-        logger.error("Failed to download voice '%s': %s", voice_name, e)
-        if onnx_path.exists():
-            onnx_path.unlink()
-        if json_path.exists():
-            json_path.unlink()
-        return False
+            with publication_lock:
+                # Publish the missing asset first so a failed second rename preserves existing data.
+                first, second = onnx_path, json_path
+                if onnx_path.exists():
+                    first, second = second, first
+                staged[first].replace(first)
+                try:
+                    staged[second].replace(second)
+                except OSError:
+                    first.unlink(missing_ok=True)
+                    raise
+            return True
+        except (OSError, ValueError, requests.RequestException):
+            logger.warning("Could not download voice %r", voice_name)
+            return False
+        finally:
+            for path in staged.values():
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Could not remove staged voice asset %s", path)
 
 
 def normalize_audio_format(target_format: Optional[str]) -> tuple[str, str]:
@@ -352,7 +382,7 @@ def stream_audio_generator(
 
 @app.post("/audio/speech", include_in_schema=False)
 @app.post("/v1/audio/speech")
-async def generate_speech(request: OpenAISpeechRequest):
+def generate_speech(request: OpenAISpeechRequest):
     """
     OpenAI-compatible TTS endpoint.
 
@@ -453,14 +483,14 @@ async def generate_speech(request: OpenAISpeechRequest):
 
 @app.get("/audio/voices", include_in_schema=False)
 @app.get("/v1/audio/voices")
-async def list_voices():
+def list_voices():
     """List installed Piper voices for OpenAI-compatible clients."""
     return {"voices": get_installed_voice_catalog()}
 
 
 @app.get("/audio/models", include_in_schema=False)
 @app.get("/v1/audio/models")
-async def list_models():
+def list_models():
     """List installed Piper voice models for OpenAI-compatible clients."""
     return {"models": get_installed_voice_catalog()}
 
